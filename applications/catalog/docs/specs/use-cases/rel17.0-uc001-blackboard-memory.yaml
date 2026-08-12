@@ -94,6 +94,6 @@ out_of_scope:
 
 test_evidence:
   suite: test-rel17.0-blackboard-memory
-  conformance: the TestBlackboardMemory cases under conformance/, added by the implementation release
-  integration: applications/catalog mage integration:blackboardMemory, a new profile-owned target that runs against a local Chroma and Ollama and skips with a recorded reason when either is absent
-status: specified
+  conformance: go test ./conformance -run '^TestBlackboardMemory'
+  integration: applications/catalog mage integration:blackboardMemory against a local Chroma and Ollama; the target reports SKIP with a recorded reason when either is absent
+status: implemented

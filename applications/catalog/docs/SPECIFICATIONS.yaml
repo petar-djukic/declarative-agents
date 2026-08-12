@@ -190,7 +190,7 @@ roadmap_summary:
       exemplar spans into the per-trace waterfall.
   - version: "17.0"
     name: Blackboard memory corpus extensions
-    status: specified
+    status: implemented
     scope: |
       Extend the Chroma corpus family so one collection serves as shared
       short-term memory: the collection name becomes a declared parameter,
@@ -404,7 +404,7 @@ srd_index:
       metadata and exact-substring query filters with a declared result count,
       the memory-write block, and the compatibility contract that keeps the
       release 08.0 ingest and reader paths unchanged.
-    status: specified
+    status: implemented
     path: docs/specs/software-requirements/srd023-blackboard-memory.yaml
 
 config_format_index: []
@@ -646,7 +646,7 @@ use_case_index:
     summary: An agent writes a provenance-tagged entry into a named collection
       through the memory-write block and a reader retrieves it by metadata and by
       exact substring, while the release 08.0 paths run unchanged.
-    status: specified
+    status: implemented
     path: docs/specs/use-cases/rel17.0-uc001-blackboard-memory.yaml
   - id: rel99.0-uc001-observer-family
     title: The observer is a catalog-owned family adopted across applications
@@ -800,7 +800,7 @@ test_suite_index:
     summary: Declaration, fixture-backed roundtrip, collection-isolation,
       compatibility, and live integration cases for the corpus extensions and the
       memory-write block.
-    status: specified
+    status: implemented
     path: docs/specs/test-suites/test-rel17.0-blackboard-memory.yaml
   - id: test-rel99.0-observer
     title: Test Suite for Release 99.0 Observer Family Promotion

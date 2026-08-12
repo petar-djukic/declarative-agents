@@ -32,6 +32,7 @@ func (i Integration) All() error {
 		{"documentationCurator", i.DocumentationCurator, true},
 		{"benchEvaluator", i.BenchEvaluator, true},
 		{"monitorControl", i.MonitorControl, false},
+		{"blackboardMemory", i.BlackboardMemory, true},
 	}
 
 	var passed, failed, skipped int

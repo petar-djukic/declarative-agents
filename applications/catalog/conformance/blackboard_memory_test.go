@@ -3,16 +3,20 @@
 package conformance
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -326,6 +330,10 @@ func TestBlackboardMemoryCompatibility(t *testing.T) {
 	}
 }
 
+// corpusEmbeddingModel is the model the shipped corpus REST embed operations
+// name; the live gate probes for exactly this model.
+const corpusEmbeddingModel = "qwen3-embedding:8b"
+
 // blackboardFixture is a deterministic Chroma and Ollama protocol double. It
 // records what the shipped words actually sent: the collection names they
 // create-or-got, and the add body per resolved collection id.
@@ -545,5 +553,187 @@ func TestBlackboardMemoryCollectionIsolation(t *testing.T) {
 		if len(ids) != 1 || ids[0] != wantID {
 			t.Errorf("%s stored ids = %#v, want [%s]", collectionID, adds[0]["ids"], wantID)
 		}
+	}
+}
+
+// chromaBaseURL is the address the shipped corpus REST declarations bind for
+// the local Chroma server.
+const chromaBaseURL = "http://127.0.0.1:8000"
+
+// TestBlackboardMemoryLiveRoundtrip writes a provenance-tagged entry through the
+// shipped memory-write block against a live local Chroma and Ollama, then reads
+// it back twice: once by a metadata filter and once by an exact substring of its
+// content.
+//
+// The query is issued with the body the shipped query_records_filtered operation
+// declares — the template is read from corpus-rest.yaml and its param tokens are
+// substituted here — so this exercises the declared request shape against real
+// Chroma rather than a copy of it. Binding those query words into a machine is
+// the swarm's rlm-worker profile, not the catalog's.
+//
+// Traces rel17.0-uc001-blackboard-memory S1 and S2.
+func TestBlackboardMemoryLiveRoundtrip(t *testing.T) {
+	RequireLiveModel(t, ollamaURLFromEnvironment(), corpusEmbeddingModel)
+	requireLiveChroma(t)
+
+	collection := "blackboard-conformance"
+	recordID := fmt.Sprintf("finding-%d", os.Getpid())
+	content := "Worker " + recordID + " reduced three retrieved chunks into one claim."
+
+	profile := ProfilePath(filepath.Join("agents", "knowledge-manager", "memory-write", "profile.yaml"))
+	request, err := json.Marshal(blackboardEntry(collection, recordID, content, 1))
+	if err != nil {
+		t.Fatalf("encode request entry: %v", err)
+	}
+	requestPath := filepath.Join(t.TempDir(), "entry.json")
+	if err := os.WriteFile(requestPath, request, 0o644); err != nil {
+		t.Fatalf("write request file: %v", err)
+	}
+
+	result := Run(t, RunConfig{Profile: profile, Directory: t.TempDir(), Request: requestPath})
+	result.RequireExit(t, 0)
+	result.RequireTerminalState(t, "Succeeded")
+	if strings.Contains(result.Output, content) {
+		t.Errorf("run output echoes the stored content:\n%s", result.Output)
+	}
+
+	collectionID := liveCollectionID(t, collection)
+	byMetadata := liveFilteredQuery(t, collectionID, content,
+		map[string]any{"agent": "rlm-worker"},
+		map[string]any{"$contains": "reduced three retrieved chunks"})
+	if !slices.Contains(byMetadata, recordID) {
+		t.Errorf("metadata and substring filters did not retrieve %s; got %v", recordID, byMetadata)
+	}
+
+	byOtherAgent := liveFilteredQuery(t, collectionID, content,
+		map[string]any{"agent": "no-such-agent"},
+		map[string]any{"$contains": "reduced three retrieved chunks"})
+	if slices.Contains(byOtherAgent, recordID) {
+		t.Errorf("a metadata filter naming another agent still returned %s", recordID)
+	}
+}
+
+// requireLiveChroma skips with a recorded reason when the local Chroma server
+// the shipped declarations bind is unreachable.
+func requireLiveChroma(t *testing.T) {
+	t.Helper()
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get(chromaBaseURL + "/api/v2/heartbeat")
+	if err != nil {
+		t.Skipf("live blackboard conformance enabled but Chroma is unavailable at %s: %v; start it with `chroma run --path <dir>` and rerun",
+			chromaBaseURL, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Skipf("live blackboard conformance enabled but Chroma heartbeat at %s returned %d; start a healthy server and rerun",
+			chromaBaseURL, response.StatusCode)
+	}
+}
+
+// liveCollectionID create-or-gets the named collection the way the shipped
+// create_or_get_collection_named operation does and returns its id.
+func liveCollectionID(t *testing.T, name string) string {
+	t.Helper()
+	rest := readCorpusREST(t)
+	operation := blackboardOp(t, rest, "chroma", "create_or_get_collection_named")
+	body := renderBlackboardBody(t, operation.Body, map[string]any{"collection_name": name})
+	var resolved struct {
+		ID string `json:"id"`
+	}
+	livePost(t, chromaBaseURL+operation.Path, body, &resolved)
+	if resolved.ID == "" {
+		t.Fatalf("create-or-get %s returned no collection id", name)
+	}
+	return resolved.ID
+}
+
+// liveFilteredQuery issues the shipped filtered query against the live
+// collection and returns the retrieved record ids.
+func liveFilteredQuery(t *testing.T, collectionID, content string, where, whereDocument map[string]any) []string {
+	t.Helper()
+	rest := readCorpusREST(t)
+	operation := blackboardOp(t, rest, "chroma", "query_records_filtered")
+	body := renderBlackboardBody(t, operation.Body, map[string]any{
+		"query_embeddings": liveEmbedding(t, content),
+		"where":            where,
+		"where_document":   whereDocument,
+		"n_results":        10,
+	})
+	var response struct {
+		IDs [][]string `json:"ids"`
+	}
+	livePost(t, chromaBaseURL+strings.ReplaceAll(operation.Path, "{collection}", collectionID), body, &response)
+	if len(response.IDs) == 0 {
+		return nil
+	}
+	return response.IDs[0]
+}
+
+// liveEmbedding computes a vector at the provider the shipped embed_memory
+// operation names, so the query vector comes from the same model as the write.
+func liveEmbedding(t *testing.T, content string) []float64 {
+	t.Helper()
+	var response struct {
+		Embedding []float64 `json:"embedding"`
+	}
+	livePost(t, ollamaURLFromEnvironment()+"/api/embeddings",
+		map[string]any{"model": corpusEmbeddingModel, "prompt": content}, &response)
+	if len(response.Embedding) == 0 {
+		t.Fatal("provider returned no embedding for the query text")
+	}
+	return response.Embedding
+}
+
+// renderBlackboardBody substitutes declared param tokens in a shipped body
+// template, applying the single-token rule: a value that is exactly one
+// "{{ params.NAME }}" token renders that param's raw typed value.
+func renderBlackboardBody(t *testing.T, template map[string]any, params map[string]any) map[string]any {
+	t.Helper()
+	rendered := map[string]any{}
+	for key, value := range template {
+		rendered[key] = renderBlackboardValue(t, value, params)
+	}
+	return rendered
+}
+
+func renderBlackboardValue(t *testing.T, value any, params map[string]any) any {
+	t.Helper()
+	switch typed := value.(type) {
+	case string:
+		for name, param := range params {
+			if typed == "{{ params."+name+" }}" {
+				return param
+			}
+		}
+		return typed
+	case []any:
+		rendered := make([]any, 0, len(typed))
+		for _, item := range typed {
+			rendered = append(rendered, renderBlackboardValue(t, item, params))
+		}
+		return rendered
+	default:
+		return typed
+	}
+}
+
+func livePost(t *testing.T, endpoint string, body map[string]any, target any) {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode request for %s: %v", endpoint, err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Post(endpoint, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST %s: %v", endpoint, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		detail, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST %s returned %d: %s", endpoint, response.StatusCode, detail)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		t.Fatalf("decode %s response: %v", endpoint, err)
 	}
 }

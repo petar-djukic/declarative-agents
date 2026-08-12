@@ -123,6 +123,41 @@ rest:
           reversibility:
             classification: reversible
             undo: noop
+        embed_memory_query:
+          method: POST
+          path: /api/embeddings
+          params:
+            body_schema:
+              type: object
+              required: [content, collection, where, where_document, n_results]
+              properties:
+                content: {type: string}
+                collection: {type: string}
+                where: {type: object}
+                where_document: {type: object}
+                n_results: {type: integer}
+            body_source: previous_result
+            input_mapping:
+              content: $.content
+              collection: $.collection
+              where: $.where
+              where_document: $.where_document
+              n_results: $.n_results
+            carry_forward: [collection, where, where_document, n_results]
+          body:
+            model: qwen3-embedding:8b
+            prompt: "{{ params.content }}"
+          success: {status: [200], signal: QueryEmbedded}
+          response:
+            output:
+              embedding: $.embedding
+          side_effects:
+            - kind: external_api
+              target: ollama.embeddings
+              state: read_only
+          reversibility:
+            classification: reversible
+            undo: noop
     chroma:
       base_url: http://127.0.0.1:8000
       auth_ref: none

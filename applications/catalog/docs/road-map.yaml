@@ -836,7 +836,7 @@ releases:
 
   - id: "17.0"
     title: Blackboard memory corpus extensions
-    status: specified
+    status: implemented
     dependencies:
       - catalog release 08.0 (Chroma corpus agents and the profile-owned REST vocabulary)
       - agent-core srd028 R12 previous-Result parameter threading
@@ -845,16 +845,16 @@ releases:
       - {gh: 7, title: "Implement blackboard-memory corpus extensions in catalog knowledge-manager", estimated_loc: "250 YAML, 400 test"}
     specification:
       srd: srd023-blackboard-memory
-      status: specified
+      status: implemented
     use_cases:
       - id: rel17.0-uc001-blackboard-memory
         title: Tagged write and filtered read on a per-task blackboard
-        status: specified
+        status: implemented
     test_suites:
       - id: test-rel17.0-blackboard-memory
         title: Blackboard memory corpus extensions
         cases: 7
-        status: specified
+        status: implemented
     proof:
       - mage validate
       - mage conformance

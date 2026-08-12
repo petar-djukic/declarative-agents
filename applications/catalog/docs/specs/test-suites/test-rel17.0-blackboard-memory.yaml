@@ -1,7 +1,7 @@
 id: test-rel17.0-blackboard-memory
 title: Test Suite for Release 17.0 Blackboard Memory Corpus Extensions
 release: "17.0"
-status: specified
+status: implemented
 
 overview: |
   This suite proves the four corpus extensions and, in the same pass, proves
@@ -18,10 +18,11 @@ overview: |
   request bodies the ingest and reader machines produce, and fails if either
   changed.
 
-  Each case names the conformance test that implements it. A case whose test
-  has not shipped yet carries the specification gate as its target, because the
-  evidence validator rejects a go_test selector that matches nothing; each case
-  flips to its go_test as that test lands.
+  The live case issues its query with the body the shipped
+  query_records_filtered operation declares, read from corpus-rest.yaml and
+  substituted here, so the declared request shape is exercised against real
+  Chroma. Binding the query words into a machine belongs to the swarm profiles
+  that consume this blackboard, not to the catalog.
 
 traces:
   - rel17.0-uc001-blackboard-memory
@@ -152,18 +153,20 @@ test_cases:
   - use_case: rel17.0-uc001-blackboard-memory
     name: Live roundtrip writes a tagged entry and reads it back
     integration_target: mage integration:blackboardMemory
-    status: specified
+    status: implemented
     description: |
       Against a live local Chroma and Ollama, memory-write stores a tagged entry
       in a named collection and the filtered query word retrieves it both by its
-      metadata and by an exact substring of its content. The target records a
-      skip reason when either server is absent.
+      metadata and by an exact substring of its content, and a filter naming a
+      different agent does not return it. The target reports SKIP with a
+      recorded reason when either server is absent.
     inputs:
       servers: [chroma, ollama]
     expected:
       tagged_write_succeeds_against_live_chroma: true
       metadata_filter_retrieves_the_entry: true
       contains_filter_retrieves_the_entry: true
+      opposite_metadata_filter_excludes_the_entry: true
       skip_reason_recorded_when_servers_absent: true
     traces:
       - rel17.0-uc001-blackboard-memory S1
