@@ -3,8 +3,15 @@
 package conformance
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -315,6 +322,228 @@ func TestBlackboardMemoryCompatibility(t *testing.T) {
 				t.Errorf("%s word %s binds blackboard operation %s; the release 08.0 blocks stay unchanged",
 					block, tool.Name, tool.Config.Operation)
 			}
+		}
+	}
+}
+
+// blackboardFixture is a deterministic Chroma and Ollama protocol double. It
+// records what the shipped words actually sent: the collection names they
+// create-or-got, and the add body per resolved collection id.
+type blackboardFixture struct {
+	server *httptest.Server
+
+	mu          sync.Mutex
+	collections []string
+	adds        map[string][]map[string]any
+}
+
+func newBlackboardFixture(t *testing.T) *blackboardFixture {
+	t.Helper()
+	fixture := &blackboardFixture{adds: map[string][]map[string]any{}}
+	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/embeddings":
+			_, _ = w.Write([]byte(`{"embedding":[0.25,0.75]}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/collections"):
+			body := decodeBlackboardBody(t, r)
+			name, _ := body["name"].(string)
+			id := fixture.recordCollection(name)
+			_, _ = w.Write([]byte(`{"id":"` + id + `","name":"` + name + `"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/add"):
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			collectionID := parts[len(parts)-2]
+			fixture.recordAdd(collectionID, decodeBlackboardBody(t, r))
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fixture.server.Close)
+	return fixture
+}
+
+func (f *blackboardFixture) recordCollection(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index, existing := range f.collections {
+		if existing == name {
+			return fmt.Sprintf("collection-%d", index+1)
+		}
+	}
+	f.collections = append(f.collections, name)
+	return fmt.Sprintf("collection-%d", len(f.collections))
+}
+
+func (f *blackboardFixture) recordAdd(collectionID string, body map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.adds[collectionID] = append(f.adds[collectionID], body)
+}
+
+func (f *blackboardFixture) addsFor(collectionID string) []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.adds[collectionID]...)
+}
+
+func (f *blackboardFixture) collectionNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.collections...)
+}
+
+func decodeBlackboardBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	body := map[string]any{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Errorf("decode %s request body: %v", r.URL.Path, err)
+	}
+	return body
+}
+
+// writeMemoryEntry runs the shipped memory-write block against the fixture with
+// one request entry and returns the run result.
+func writeMemoryEntry(t *testing.T, fixture *blackboardFixture, entry map[string]any) RunResult {
+	t.Helper()
+	profile := CopyShippedProfile(t,
+		filepath.Join("agents", "knowledge-manager", "memory-write", "profile.yaml"),
+		map[string]string{"../corpus-rest.yaml": "corpus-rest.yaml"})
+
+	restData, err := os.ReadFile(ProfilePath(filepath.Join("agents", "knowledge-manager", "corpus-rest.yaml")))
+	if err != nil {
+		t.Fatalf("read shipped corpus REST definition: %v", err)
+	}
+	parsed, err := url.Parse(fixture.server.URL)
+	if err != nil {
+		t.Fatalf("parse fixture URL: %v", err)
+	}
+	rest := strings.ReplaceAll(string(restData), "http://127.0.0.1:11434", fixture.server.URL)
+	rest = strings.ReplaceAll(rest, "http://127.0.0.1:8000", fixture.server.URL)
+	rest = strings.ReplaceAll(rest, "ports: [8000, 11434]", "ports: ["+parsed.Port()+"]")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(profile), "corpus-rest.yaml"), []byte(rest), 0o644); err != nil {
+		t.Fatalf("write patched corpus REST definition: %v", err)
+	}
+
+	request, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("encode request entry: %v", err)
+	}
+	requestPath := filepath.Join(t.TempDir(), "entry.json")
+	if err := os.WriteFile(requestPath, request, 0o644); err != nil {
+		t.Fatalf("write request file: %v", err)
+	}
+
+	return Run(t, RunConfig{Profile: profile, Directory: t.TempDir(), Request: requestPath})
+}
+
+func blackboardEntry(collection, id, content string, round int) map[string]any {
+	return map[string]any{
+		"content":    content,
+		"id":         id,
+		"collection": collection,
+		"source":     "derived",
+		"agent":      "rlm-worker",
+		"round":      round,
+	}
+}
+
+// TestBlackboardMemoryWriteBlock executes the shipped memory-write block
+// against deterministic Chroma and Ollama protocol fixtures. Only transport
+// addresses are patched; the shipped machine, declarations, REST operations,
+// and tool selection stay in control of sequencing and threading.
+//
+// Traces srd023-blackboard-memory R4: the entry arrives as request input, the
+// machine sequences embed, resolve, and write, and the run returns the record
+// id rather than the stored content.
+func TestBlackboardMemoryWriteBlock(t *testing.T) {
+	t.Parallel()
+	fixture := newBlackboardFixture(t)
+	const content = "The reducer merged four worker findings into one claim."
+	result := writeMemoryEntry(t, fixture, blackboardEntry("task-alpha", "finding-0042", content, 3))
+
+	// R4.2: the machine reaches its success terminal through the three words.
+	result.RequireExit(t, 0)
+	result.RootRequired(t)
+	result.RequireNoErrorSpans(t)
+	result.RequireToolSpans(t, "embed_memory", "resolve_memory_collection", "write_memory")
+	result.RequireTerminalState(t, "Succeeded")
+
+	// R4.3: the block writes what it is given; it selects no discovery or read
+	// word that could introduce content the caller did not supply.
+	var selection struct {
+		Tools []string `yaml:"tools"`
+	}
+	readKnowledgeYAML(t,
+		filepath.Join("..", "agents", "knowledge-manager", "memory-write", "tools.yaml"),
+		&selection)
+	for _, tool := range selection.Tools {
+		if tool == "read_resource" || tool == "list_resource" || tool == "invoke_llm" {
+			t.Errorf("memory-write selects %q; the block writes only the supplied entry", tool)
+		}
+	}
+
+	// R1.1, R4.3: the collection the request named is the collection created.
+	if got := fixture.collectionNames(); len(got) != 1 || got[0] != "task-alpha" {
+		t.Fatalf("create-or-got collections = %v, want [task-alpha]", got)
+	}
+
+	// R2.1, R2.2: the stored record carries its provenance.
+	adds := fixture.addsFor("collection-1")
+	if len(adds) != 1 {
+		t.Fatalf("adds against the named collection = %d, want 1", len(adds))
+	}
+	metadatas, ok := adds[0]["metadatas"].([]any)
+	if !ok || len(metadatas) != 1 {
+		t.Fatalf("add body metadatas = %#v, want one entry", adds[0]["metadatas"])
+	}
+	metadata, _ := metadatas[0].(map[string]any)
+	for field, want := range map[string]any{"source": "derived", "agent": "rlm-worker", "round": float64(3)} {
+		if got := metadata[field]; got != want {
+			t.Errorf("stored metadata %s = %#v, want %#v", field, got, want)
+		}
+	}
+
+	// The document and the provider vector reach Chroma as sent, so the entry is
+	// retrievable by content as well as by tag.
+	if documents, _ := adds[0]["documents"].([]any); len(documents) != 1 || documents[0] != content {
+		t.Errorf("stored documents = %#v, want the supplied content", adds[0]["documents"])
+	}
+	if embeddings, _ := adds[0]["embeddings"].([]any); len(embeddings) != 1 {
+		t.Errorf("stored embeddings = %#v, want the threaded provider vector", adds[0]["embeddings"])
+	}
+
+	// R4.4, D2: the run hands back a handle, not the content it stored.
+	if !strings.Contains(result.Output, "finding-0042") {
+		t.Errorf("run output does not carry the record id:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, content) {
+		t.Errorf("run output echoes the stored content; a write returns a handle:\n%s", result.Output)
+	}
+}
+
+// TestBlackboardMemoryCollectionIsolation pins srd023 R1.1: two runs naming two
+// collections write to two collections, so per-task blackboards do not share
+// entries.
+func TestBlackboardMemoryCollectionIsolation(t *testing.T) {
+	t.Parallel()
+	fixture := newBlackboardFixture(t)
+	first := writeMemoryEntry(t, fixture, blackboardEntry("task-alpha", "alpha-1", "Alpha finding.", 1))
+	second := writeMemoryEntry(t, fixture, blackboardEntry("task-beta", "beta-1", "Beta finding.", 1))
+	first.RequireTerminalState(t, "Succeeded")
+	second.RequireTerminalState(t, "Succeeded")
+
+	if got := fixture.collectionNames(); len(got) != 2 || got[0] != "task-alpha" || got[1] != "task-beta" {
+		t.Fatalf("create-or-got collections = %v, want [task-alpha task-beta]", got)
+	}
+	for collectionID, wantID := range map[string]string{"collection-1": "alpha-1", "collection-2": "beta-1"} {
+		adds := fixture.addsFor(collectionID)
+		if len(adds) != 1 {
+			t.Fatalf("adds against %s = %d, want 1", collectionID, len(adds))
+		}
+		ids, _ := adds[0]["ids"].([]any)
+		if len(ids) != 1 || ids[0] != wantID {
+			t.Errorf("%s stored ids = %#v, want [%s]", collectionID, adds[0]["ids"], wantID)
 		}
 	}
 }

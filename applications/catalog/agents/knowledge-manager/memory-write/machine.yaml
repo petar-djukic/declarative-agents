@@ -1,0 +1,82 @@
+name: memory-write
+purpose: |-
+  The memory-write profile stores one provenance-tagged entry on a blackboard
+  collection and returns its record id. It embeds the supplied content at
+  Ollama, create-or-gets the named collection (which resolves the returned
+  collection id and carries the record and its provenance forward), and writes
+  the record with its source, agent, and round metadata.
+
+  The caller supplies the entry through the --request file, whose contents
+  become the seed Result the first word selects from: the REST client parses a
+  prior Result output as a JSON object, so a request file holding
+  {"content", "id", "collection", "source", "agent", "round"} makes each field
+  addressable to embed_memory as $.content and so on. That is why this profile
+  needs no server and no model: the entry arrives as trusted request input
+  rather than as model-authored text, and every later word threads it through
+  the agent-core previous-Result parameter threading (srd028 R12).
+
+  The embedding vector is machine-sequenced because a model cannot author a raw
+  embedding vector. Because threading is single-hop, the create-or-get word sits
+  immediately before the write: it returns the collection id and carries the
+  vector, document, id, and provenance forward so the write threads both.
+invariants:
+  - REST authority lives in agents/knowledge-manager/corpus-rest.yaml.
+  - MachineSpec owns sequencing between the embed, collection, and write words.
+  - No embedding vector is authored by a model; the vector threads between words.
+  - The terminal Result carries the record id, never the stored content.
+  - The Chroma and Ollama servers are external preconditions, checked by the caller, not started by this profile.
+initial_state: Idle
+budget:
+  max_iterations: 8
+states:
+  - name: Idle
+    meaning: Initial state before the write flow starts.
+  - name: Embedding
+    meaning: The supplied entry content is being embedded at Ollama.
+  - name: ResolvingCollection
+    meaning: The named collection is being create-or-got and the record carried forward.
+  - name: Writing
+    meaning: The tagged record is being written to the resolved collection.
+  - name: Succeeded
+    meaning: Terminal. The entry was stored and its record id is the run output.
+  - name: Failed
+    meaning: Terminal. An embedding or Chroma boundary word failed.
+terminal_states:
+  - Succeeded
+  - Failed
+signals:
+  - name: Seed
+    trigger: Loop initialization with the request entry.
+  - name: MemoryEmbedded
+    trigger: Ollama returned an embedding vector for the supplied content.
+  - name: CollectionReady
+    trigger: The named collection was create-or-got and its id resolved.
+  - name: MemoryAdded
+    trigger: Chroma stored the tagged record.
+  - name: CommandError
+    trigger: Runtime or REST boundary infrastructure failed.
+transitions:
+  - state: Idle
+    signal: Seed
+    next: Embedding
+    action: embed_memory
+  - state: Embedding
+    signal: MemoryEmbedded
+    next: ResolvingCollection
+    action: resolve_memory_collection
+  - state: Embedding
+    signal: CommandError
+    next: Failed
+  - state: ResolvingCollection
+    signal: CollectionReady
+    next: Writing
+    action: write_memory
+  - state: ResolvingCollection
+    signal: CommandError
+    next: Failed
+  - state: Writing
+    signal: MemoryAdded
+    next: Succeeded
+  - state: Writing
+    signal: CommandError
+    next: Failed

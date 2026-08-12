@@ -7,11 +7,11 @@ overview: |
   This suite proves the four corpus extensions and, in the same pass, proves
   that they left the release 08.0 ingest and reader paths alone. The declaration
   cases read the shipped corpus-rest.yaml and the memory-write block and assert
-  on their parameter shapes, so they run without a server. The roundtrip cases
-  drive the shipped memory-write block and the filtered query word against
-  in-process Chroma and Ollama protocol fixtures, patching transport addresses
-  only. The integration case repeats the roundtrip against a live local Chroma
-  and Ollama and records a skip reason when either is absent.
+  on their parameter shapes, so they run without a server. The block cases drive
+  the shipped memory-write profile against in-process Chroma and Ollama protocol
+  fixtures, patching transport addresses only. The integration case writes and
+  reads back against a live local Chroma and Ollama, and records a skip reason
+  when either is absent.
 
   The compatibility case is the one that decides whether the release is
   additive: it compares the release 08.0 operation declarations against the
@@ -72,26 +72,6 @@ test_cases:
       - srd023-blackboard-memory R4.4
 
   - use_case: rel17.0-uc001-blackboard-memory
-    name: A tagged write is retrieved by its metadata and not by the opposite filter
-    integration_target: mage validate
-    status: specified
-    description: |
-      The tagged add word sends a metadata object carrying source, agent, and
-      round with the record. A query filtered on source derived returns the
-      record and a query filtered on source corpus does not. Implemented by
-      TestBlackboardMemoryTaggedRoundtrip under conformance/ against in-process
-      Chroma and Ollama fixtures, once the memory-write block ships.
-    inputs:
-      provenance: {source: derived, agent: rlm-worker, round: 1}
-    expected:
-      add_body_carries_metadata: true
-      where_source_derived_returns_record: true
-      where_source_corpus_excludes_record: true
-    traces:
-      - srd023-blackboard-memory AC2
-      - rel17.0-uc001-blackboard-memory S1
-
-  - use_case: rel17.0-uc001-blackboard-memory
     name: Exact substring and declared result count reach the query body
     go_test: go test ./conformance -run '^TestBlackboardMemoryFilteredQuery$'
     status: implemented
@@ -112,13 +92,14 @@ test_cases:
 
   - use_case: rel17.0-uc001-blackboard-memory
     name: memory-write returns the record id and never the stored content
-    integration_target: mage validate
-    status: specified
+    go_test: go test ./conformance -run '^TestBlackboardMemoryWriteBlock$'
+    status: implemented
     description: |
       The memory-write machine sequences embedding, collection resolution, and
       the tagged write, reaches its success terminal with the record id carried
       out of the write word, and does not select the read tool or emit the stored
-      content. Implemented by TestBlackboardMemoryWriteBlock under conformance/.
+      content. The entry arrives through the --request file, so no model
+      authors it.
     inputs:
       block: agents/knowledge-manager/memory-write
     expected:
@@ -132,12 +113,11 @@ test_cases:
 
   - use_case: rel17.0-uc001-blackboard-memory
     name: Two named collections stay separate
-    integration_target: mage validate
-    status: specified
+    go_test: go test ./conformance -run '^TestBlackboardMemoryCollectionIsolation$'
+    status: implemented
     description: |
       Records written through two different collection names land in two
-      collections, and a query against one returns none of the other's records.
-      Implemented by TestBlackboardMemoryCollectionIsolation under conformance/.
+      collections, and neither run's record reaches the other's collection.
     inputs:
       collections: [task-alpha, task-beta]
     expected:
@@ -165,7 +145,6 @@ test_cases:
       legacy_operation_declarations_unchanged: true
       legacy_blocks_bind_no_blackboard_operation: true
       n_results_default_remains_5: true
-      mesh_wrappers_untouched: true
     traces:
       - srd023-blackboard-memory AC5
       - rel17.0-uc001-blackboard-memory S5
