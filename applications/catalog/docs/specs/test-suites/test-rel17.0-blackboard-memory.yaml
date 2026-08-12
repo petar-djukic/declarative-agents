@@ -1,0 +1,174 @@
+id: test-rel17.0-blackboard-memory
+title: Test Suite for Release 17.0 Blackboard Memory Corpus Extensions
+release: "17.0"
+status: specified
+
+overview: |
+  This suite proves the four corpus extensions and, in the same pass, proves
+  that they left the release 08.0 ingest and reader paths alone. The declaration
+  cases read the shipped corpus-rest.yaml and the memory-write block and assert
+  on their parameter shapes, so they run without a server. The roundtrip cases
+  drive the shipped memory-write block and the filtered query word against
+  in-process Chroma and Ollama protocol fixtures, patching transport addresses
+  only. The integration case repeats the roundtrip against a live local Chroma
+  and Ollama and records a skip reason when either is absent.
+
+  The compatibility case is the one that decides whether the release is
+  additive: it compares the release 08.0 operation declarations against the
+  request bodies the ingest and reader machines produce, and fails if either
+  changed.
+
+  Each case names the conformance test that implements it. Until that test
+  exists the case carries the specification gate as its target, because the
+  evidence validator rejects a go_test selector that matches nothing; the
+  implementation release flips each case to its go_test.
+
+traces:
+  - rel17.0-uc001-blackboard-memory
+
+preconditions:
+  - A compatible agent-core checkout is available as the sibling ../../agent-core directory.
+  - No live Chroma or Ollama service is required for the declaration and fixture-backed conformance cases.
+  - The integration case requires a running Chroma server and a reachable Ollama with the configured embedding model, and skips with a recorded reason otherwise.
+
+test_cases:
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: Parameterized create-or-get words name the collection and thread identity
+    integration_target: mage validate
+    status: specified
+    description: |
+      The parameterized create-or-get words declare the collection name as a
+      body param rendered into the request body, resolve the returned collection
+      id into their Result output, and carry the inbound record or query payload
+      forward so the following word threads both. Implemented by
+      TestBlackboardMemoryCollectionParameter under conformance/.
+    inputs:
+      declaration: agents/knowledge-manager/corpus-rest.yaml
+    expected:
+      collection_name_is_declared_param: true
+      returned_collection_id_resolved: true
+      inbound_payload_carried_forward: true
+    traces:
+      - srd023-blackboard-memory AC1
+      - rel17.0-uc001-blackboard-memory S4
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: A tagged write is retrieved by its metadata and not by the opposite filter
+    integration_target: mage validate
+    status: specified
+    description: |
+      The tagged add word sends a metadata object carrying source, agent, and
+      round with the record. A query filtered on source derived returns the
+      record and a query filtered on source corpus does not. Implemented by
+      TestBlackboardMemoryTaggedWrite under conformance/ against in-process
+      Chroma and Ollama fixtures.
+    inputs:
+      provenance: {source: derived, agent: rlm-worker, round: 1}
+    expected:
+      add_body_carries_metadata: true
+      where_source_derived_returns_record: true
+      where_source_corpus_excludes_record: true
+    traces:
+      - srd023-blackboard-memory AC2
+      - rel17.0-uc001-blackboard-memory S1
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: Exact substring and declared result count reach the query body
+    integration_target: mage validate
+    status: specified
+    description: |
+      The filtered query word declares where, where_document, and the result
+      count as required params, so the rendered body carries a $contains filter
+      and an integer count rather than a null. Implemented by
+      TestBlackboardMemoryFilteredQuery under conformance/.
+    inputs:
+      where_document: {$contains: "finding-0042"}
+      n_results: 20
+    expected:
+      where_document_contains_reaches_body: true
+      n_results_is_declared_param: true
+      filter_params_declared_required: true
+    traces:
+      - srd023-blackboard-memory AC3
+      - rel17.0-uc001-blackboard-memory S2
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: memory-write returns the record id and never the stored content
+    integration_target: mage validate
+    status: specified
+    description: |
+      The memory-write machine sequences embedding, collection resolution, and
+      the tagged write, reaches its success terminal with the record id carried
+      out of the write word, and does not select the read tool or emit the stored
+      content. Implemented by TestBlackboardMemoryWriteBlock under conformance/.
+    inputs:
+      block: agents/knowledge-manager/memory-write
+    expected:
+      machine_sequences_embed_resolve_add: true
+      record_id_reaches_terminal_result: true
+      stored_content_absent_from_result: true
+      read_tool_not_selected: true
+    traces:
+      - srd023-blackboard-memory AC4
+      - rel17.0-uc001-blackboard-memory S3
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: Two named collections stay separate
+    integration_target: mage validate
+    status: specified
+    description: |
+      Records written through two different collection names land in two
+      collections, and a query against one returns none of the other's records.
+      Implemented by TestBlackboardMemoryCollectionIsolation under conformance/.
+    inputs:
+      collections: [task-alpha, task-beta]
+    expected:
+      records_written_to_distinct_collections: true
+      query_returns_only_its_own_collection: true
+    traces:
+      - srd023-blackboard-memory AC1
+      - rel17.0-uc001-blackboard-memory S4
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: Release 08.0 operations and blocks are unchanged
+    integration_target: cd ../.. && mage audit
+    status: specified
+    description: |
+      The create_or_get_collection, create_or_get_collection_carry,
+      create_or_get_collection_query, add_records, and query_records
+      declarations match their release 08.0 shape, the corpus-ingest and
+      corpus-reader blocks are untouched, the reader still queries with a result
+      count of 5, and the chatbot-mesh wrappers are not modified. Implemented by
+      TestBlackboardMemoryCompatibility under conformance/.
+    inputs:
+      legacy_operations: [create_or_get_collection, create_or_get_collection_carry, create_or_get_collection_query, add_records, query_records]
+    expected:
+      legacy_operation_declarations_unchanged: true
+      ingest_request_body_unchanged: true
+      reader_request_body_unchanged: true
+      n_results_default_remains_5: true
+      mesh_wrappers_untouched: true
+    traces:
+      - srd023-blackboard-memory AC5
+      - rel17.0-uc001-blackboard-memory S5
+
+  - use_case: rel17.0-uc001-blackboard-memory
+    name: Live roundtrip writes a tagged entry and reads it back
+    integration_target: mage integration:blackboardMemory
+    status: specified
+    description: |
+      Against a live local Chroma and Ollama, memory-write stores a tagged entry
+      in a named collection and the filtered query word retrieves it both by its
+      metadata and by an exact substring of its content. The target records a
+      skip reason when either server is absent.
+    inputs:
+      servers: [chroma, ollama]
+    expected:
+      tagged_write_succeeds_against_live_chroma: true
+      metadata_filter_retrieves_the_entry: true
+      contains_filter_retrieves_the_entry: true
+      skip_reason_recorded_when_servers_absent: true
+    traces:
+      - rel17.0-uc001-blackboard-memory S1
+      - rel17.0-uc001-blackboard-memory S2
+      - srd012-chroma-corpus-agents R5.1
