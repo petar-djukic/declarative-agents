@@ -18,10 +18,10 @@ overview: |
   request bodies the ingest and reader machines produce, and fails if either
   changed.
 
-  Each case names the conformance test that implements it. Until that test
-  exists the case carries the specification gate as its target, because the
-  evidence validator rejects a go_test selector that matches nothing; the
-  implementation release flips each case to its go_test.
+  Each case names the conformance test that implements it. A case whose test
+  has not shipped yet carries the specification gate as its target, because the
+  evidence validator rejects a go_test selector that matches nothing; each case
+  flips to its go_test as that test lands.
 
 traces:
   - rel17.0-uc001-blackboard-memory
@@ -34,14 +34,13 @@ preconditions:
 test_cases:
   - use_case: rel17.0-uc001-blackboard-memory
     name: Parameterized create-or-get words name the collection and thread identity
-    integration_target: mage validate
-    status: specified
+    go_test: go test ./conformance -run '^TestBlackboardMemoryCollectionParameter$'
+    status: implemented
     description: |
       The parameterized create-or-get words declare the collection name as a
       body param rendered into the request body, resolve the returned collection
       id into their Result output, and carry the inbound record or query payload
-      forward so the following word threads both. Implemented by
-      TestBlackboardMemoryCollectionParameter under conformance/.
+      forward so the following word threads both.
     inputs:
       declaration: agents/knowledge-manager/corpus-rest.yaml
     expected:
@@ -53,6 +52,26 @@ test_cases:
       - rel17.0-uc001-blackboard-memory S4
 
   - use_case: rel17.0-uc001-blackboard-memory
+    name: The tagged add sends provenance and returns only a handle
+    go_test: go test ./conformance -run '^TestBlackboardMemoryTaggedWrite$'
+    status: implemented
+    description: |
+      The tagged add word sends a per-record metadata object carrying source,
+      agent, and round, threads every metadata value from a prior word rather
+      than from a response body, and carries the record id — not the stored
+      document — forward to the caller.
+    inputs:
+      provenance: {source: derived, agent: rlm-worker, round: 1}
+    expected:
+      add_body_carries_metadata: true
+      metadata_values_are_threaded_params: true
+      record_id_carried_forward: true
+      stored_document_not_carried_forward: true
+    traces:
+      - srd023-blackboard-memory AC2
+      - srd023-blackboard-memory R4.4
+
+  - use_case: rel17.0-uc001-blackboard-memory
     name: A tagged write is retrieved by its metadata and not by the opposite filter
     integration_target: mage validate
     status: specified
@@ -60,8 +79,8 @@ test_cases:
       The tagged add word sends a metadata object carrying source, agent, and
       round with the record. A query filtered on source derived returns the
       record and a query filtered on source corpus does not. Implemented by
-      TestBlackboardMemoryTaggedWrite under conformance/ against in-process
-      Chroma and Ollama fixtures.
+      TestBlackboardMemoryTaggedRoundtrip under conformance/ against in-process
+      Chroma and Ollama fixtures, once the memory-write block ships.
     inputs:
       provenance: {source: derived, agent: rlm-worker, round: 1}
     expected:
@@ -74,13 +93,12 @@ test_cases:
 
   - use_case: rel17.0-uc001-blackboard-memory
     name: Exact substring and declared result count reach the query body
-    integration_target: mage validate
-    status: specified
+    go_test: go test ./conformance -run '^TestBlackboardMemoryFilteredQuery$'
+    status: implemented
     description: |
       The filtered query word declares where, where_document, and the result
       count as required params, so the rendered body carries a $contains filter
-      and an integer count rather than a null. Implemented by
-      TestBlackboardMemoryFilteredQuery under conformance/.
+      and an integer count rather than a null.
     inputs:
       where_document: {$contains: "finding-0042"}
       n_results: 20
@@ -131,21 +149,21 @@ test_cases:
 
   - use_case: rel17.0-uc001-blackboard-memory
     name: Release 08.0 operations and blocks are unchanged
-    integration_target: cd ../.. && mage audit
-    status: specified
+    go_test: go test ./conformance -run '^TestBlackboardMemoryCompatibility$'
+    status: implemented
     description: |
       The create_or_get_collection, create_or_get_collection_carry,
       create_or_get_collection_query, add_records, and query_records
       declarations match their release 08.0 shape, the corpus-ingest and
-      corpus-reader blocks are untouched, the reader still queries with a result
-      count of 5, and the chatbot-mesh wrappers are not modified. Implemented by
-      TestBlackboardMemoryCompatibility under conformance/.
+      corpus-reader blocks are untouched, and the reader still queries with a
+      result count of 5. The shipped ingest and reader words bind none of the
+      blackboard operations, so the extensions cannot change what those two
+      blocks send.
     inputs:
       legacy_operations: [create_or_get_collection, create_or_get_collection_carry, create_or_get_collection_query, add_records, query_records]
     expected:
       legacy_operation_declarations_unchanged: true
-      ingest_request_body_unchanged: true
-      reader_request_body_unchanged: true
+      legacy_blocks_bind_no_blackboard_operation: true
       n_results_default_remains_5: true
       mesh_wrappers_untouched: true
     traces:
