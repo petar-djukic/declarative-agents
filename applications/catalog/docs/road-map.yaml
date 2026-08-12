@@ -834,6 +834,38 @@ releases:
       - Package provenance distinguishes canonical and local closure members.
       - Duplicate and statistics audits prevent copied forks and double counting.
 
+  - id: "17.0"
+    title: Blackboard memory corpus extensions
+    status: implemented
+    dependencies:
+      - catalog release 08.0 (Chroma corpus agents and the profile-owned REST vocabulary)
+      - agent-core srd028 R12 previous-Result parameter threading
+    planned_work:
+      - {gh: 6, title: "Catalog release 17.0 docs: blackboard-memory SRD, use case, test suite", estimated_loc: "0 (documentation)"}
+      - {gh: 7, title: "Implement blackboard-memory corpus extensions in catalog knowledge-manager", estimated_loc: "250 YAML, 400 test"}
+    specification:
+      srd: srd023-blackboard-memory
+      status: implemented
+    use_cases:
+      - id: rel17.0-uc001-blackboard-memory
+        title: Tagged write and filtered read on a per-task blackboard
+        status: implemented
+    test_suites:
+      - id: test-rel17.0-blackboard-memory
+        title: Blackboard memory corpus extensions
+        cases: 7
+        status: implemented
+    proof:
+      - mage validate
+      - mage conformance
+      - mage integration:blackboardMemory
+      - cd ../.. && mage audit
+    success_markers:
+      - The collection name is a declared parameter and per-task collections stay separate.
+      - Writes carry source, agent, and round provenance, and readers filter on it.
+      - memory-write returns a record id and never the stored content.
+      - The release 08.0 ingest and reader request bodies are unchanged.
+
   - id: "99.0"
     title: Observer family promotion
     status: planned

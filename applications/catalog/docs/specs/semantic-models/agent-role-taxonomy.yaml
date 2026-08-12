@@ -324,6 +324,28 @@ roles:
       - Confirm retrieved identities and chunks reach the answer model.
       - Trace reader behavior with rel08.0-uc002-corpus-query.
 
+  - id: memory-write
+    title: Blackboard entry writer
+    profile_path: agents/knowledge-manager/memory-write/profile.yaml
+    actor_boundary: requesting agent, embedding provider, and Chroma
+    inputs:
+      - request entry content and record id
+      - target collection name
+      - provenance source, agent, and round
+    selected_tool_families:
+      - REST client
+    runtime_dependencies:
+      - agent-core REST boundary and previous-Result threading
+      - profile-owned corpus REST operations
+    outputs:
+      - stored record id
+    outcomes: [Succeeded, Failed]
+    checks:
+      - Confirm the entry arrives as request input, not as model-authored text.
+      - Confirm the stored record carries source, agent, and round metadata.
+      - Confirm the terminal Result returns the record id and not the stored content.
+      - Trace write behavior with rel17.0-uc001-blackboard-memory.
+
   - id: scenario-critic
     title: Test rig and scenario composer
     profile_path: agents/scenario-critic/profile.yaml

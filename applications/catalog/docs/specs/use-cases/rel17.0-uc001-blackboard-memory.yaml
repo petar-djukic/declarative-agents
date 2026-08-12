@@ -1,0 +1,99 @@
+id: rel17.0-uc001-blackboard-memory
+title: Tagged Write and Filtered Read on a Per-Task Blackboard
+
+summary: |
+  An agent writes a derived finding into a per-task Chroma collection through the
+  memory-write block, and a reader retrieves that finding by metadata filter and
+  by exact substring without reading the rest of the collection. The write embeds
+  the content at the local Ollama provider, resolves the named collection, adds
+  the record with its provenance tags, and returns the record id alone.
+
+  The same collection holds ingested documents tagged source: corpus and agent
+  entries tagged source: derived, so a reader selects one population or the other
+  through the metadata filter rather than through the ranking. The release 08.0
+  ingest and reader paths run against their own collection unchanged, which is
+  what makes these extensions additive.
+
+actor: A profile that writes shared short-term memory, and a profile that reads it back.
+
+trigger: |
+  A profile selects the memory-write block with content, a record id, a
+  collection name, and provenance fields, or selects the filtered query word with
+  a metadata filter, an exact substring filter, and a result count.
+
+preconditions:
+  - A Chroma server is running against a persistence directory, started by the harness or operator, not the agent.
+  - An Ollama server is reachable and has the configured embedding model pulled.
+  - agents/knowledge-manager/corpus-rest.yaml owns the Chroma and Ollama REST authority for the family.
+
+flow:
+  - id: F1
+    text: The memory-write machine embeds the supplied content at Ollama and carries the content id, the collection name, and the provenance fields forward.
+  - id: F2
+    text: The parameterized create-or-get word names the collection from the carried collection name, resolves the returned collection id, and carries the vector, document, id, and metadata forward.
+  - id: F3
+    text: The tagged add word threads the resolved collection id, the vector, the document, the id, and the metadata object into the Chroma add body.
+  - id: F4
+    text: The machine reaches its success terminal with the record id carried out of the write word, and without the stored content in its Result output.
+  - id: F5
+    text: A reader embeds its query, resolves the same named collection, and queries it with a where filter on source and agent, a where_document $contains filter on a literal identifier, and a declared result count.
+  - id: F6
+    text: The release 08.0 ingest and reader machines run their unchanged words against their own collection and send the request bodies they sent before the extensions existed.
+
+touchpoints:
+  - id: T1
+    target: srd023-blackboard-memory AC1
+    reason: The parameterized create-or-get words select the collection per invocation and preserve the single-hop threading shape.
+  - id: T2
+    target: srd023-blackboard-memory AC2
+    reason: The add body carries the source, agent, and round provenance for the written record.
+  - id: T3
+    target: srd023-blackboard-memory AC3
+    reason: The reader selects entries by metadata, by exact substring, and with a declared result count.
+  - id: T4
+    target: srd023-blackboard-memory AC4
+    reason: memory-write is a shipped block that returns a record handle rather than the stored content.
+  - id: T5
+    target: srd023-blackboard-memory AC5
+    reason: The unchanged ingest and reader paths are the compatibility evidence for the additive extensions.
+  - id: T6
+    target: srd012-chroma-corpus-agents AC3
+    reason: The write vector is threaded between boundary words under srd028 R12, never authored by a model.
+
+success_criteria:
+  - id: S1
+    criterion: A record written with source derived is retrieved by a where filter on that metadata and is not returned when the filter selects source corpus.
+    traces:
+      - srd023-blackboard-memory R2.1
+      - srd023-blackboard-memory R2.2
+      - srd023-blackboard-memory R3.1
+  - id: S2
+    criterion: A record is retrieved by a where_document $contains filter naming a literal substring of its content.
+    traces:
+      - srd023-blackboard-memory R3.2
+  - id: S3
+    criterion: The memory-write Result output contains the record id and does not contain the stored content.
+    traces:
+      - srd023-blackboard-memory R4.4
+  - id: S4
+    criterion: Two collections named through the parameterized words hold separate records, and a query against one does not return records written to the other.
+    traces:
+      - srd023-blackboard-memory R1.1
+      - srd023-blackboard-memory R1.2
+  - id: S5
+    criterion: The ingest and reader machines send the request bodies they sent before the extensions, and their declarations are unchanged.
+    traces:
+      - srd023-blackboard-memory R5.1
+      - srd023-blackboard-memory R5.2
+
+out_of_scope:
+  - Starting or stopping the Chroma or Ollama servers from the agent.
+  - The root and worker profiles that consume the blackboard, which belong to applications/large-context-swarm.
+  - Deleting, compacting, or expiring blackboard entries.
+  - Modifying the chatbot-mesh rag-server and corpus-ingest wrappers, which own their inline retrieval configuration.
+
+test_evidence:
+  suite: test-rel17.0-blackboard-memory
+  conformance: go test ./conformance -run '^TestBlackboardMemory'
+  integration: applications/catalog mage integration:blackboardMemory against a local Chroma and Ollama; the target reports SKIP with a recorded reason when either is absent
+status: implemented

@@ -1,0 +1,4 @@
+tools:
+  - embed_memory
+  - resolve_memory_collection
+  - write_memory

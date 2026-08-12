@@ -1,0 +1,8 @@
+name: memory-write
+machine: machine.yaml
+tools:
+  - tools.yaml
+tool_declarations:
+  - declarations.yaml
+rest_definitions:
+  - ../corpus-rest.yaml
