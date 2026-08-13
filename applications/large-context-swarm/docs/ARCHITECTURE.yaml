@@ -3,7 +3,7 @@ title: Large Context Swarm Architecture
 
 capability_classification:
   ownership: agent-owning
-  module_status: planned
+  module_status: audit_only
   agents_contributed: 0
   composition_wrappers: []
 

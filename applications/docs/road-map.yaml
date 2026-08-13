@@ -267,6 +267,15 @@ releases:
           The deterministic tracer contributes three local agents and composes
           one canonical corpus-reader wrapper. Optional service, package, Helm,
           kind, and UI capabilities remain not_applicable.
+      - path: applications/large-context-swarm
+        module_state: audit_only
+        ownership: agent-owning
+        release_14_status: audit_only
+        note: |
+          The module owns its manifest, document corpus, and local audit and
+          stats targets, and reserves rlm-root and rlm-worker as planned roots.
+          It contributes zero agents and claims no runnable capability until its
+          release 01.0 evidence exists.
     evidence_status:
       shared_documents: implemented
       reciprocal_traceability: implemented

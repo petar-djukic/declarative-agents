@@ -1,0 +1,30 @@
+schema_version: 1
+application: large-context-swarm
+ownership: agent-owning
+module_status: audit_only
+capabilities:
+  runnable_module:
+    status: planned
+  managed_service:
+    status: planned
+  packaged:
+    status: planned
+  helm_managed:
+    status: planned
+  kind_demo:
+    status: planned
+  ui:
+    status: not_applicable
+roots:
+  - id: rlm-root
+    ownership: local
+    source: agents/rlm-root/profile.yaml
+    runtime_path: applications/large-context-swarm/rlm-root/profile.yaml
+    planned: true
+  - id: rlm-worker
+    ownership: local
+    source: agents/rlm-worker/profile.yaml
+    runtime_path: applications/large-context-swarm/rlm-worker/profile.yaml
+    planned: true
+runtime:
+  image_contains_profiles: false

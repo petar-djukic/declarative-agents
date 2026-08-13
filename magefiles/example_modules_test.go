@@ -60,8 +60,8 @@ func TestAgentArchitectureIsCompositionApplicationModule(t *testing.T) {
 
 func TestProseEditorIsRunnableButNotBuildManaged(t *testing.T) {
 	const module = "applications/prose-editor"
-	if len(auditOnlyApplicationModules) != 0 {
-		t.Fatalf("auditOnlyApplicationModules = %#v, want empty after tracer promotion",
+	if contains(auditOnlyApplicationModules, module) {
+		t.Fatalf("auditOnlyApplicationModules = %#v, want Prose Editor promoted out of it",
 			auditOnlyApplicationModules)
 	}
 	if !contains(applicationModules, module) || contains(subModules, module) {
@@ -121,8 +121,34 @@ func TestOrchestrationUsesStableApplicationPaths(t *testing.T) {
 	if !reflect.DeepEqual(applicationModules, wantApplications) {
 		t.Fatalf("applicationModules = %#v, want %#v", applicationModules, wantApplications)
 	}
-	if len(auditOnlyApplicationModules) != 0 {
-		t.Fatalf("auditOnlyApplicationModules = %#v, want empty", auditOnlyApplicationModules)
+	wantAuditOnly := []string{
+		"applications/large-context-swarm",
+	}
+	if !reflect.DeepEqual(auditOnlyApplicationModules, wantAuditOnly) {
+		t.Fatalf("auditOnlyApplicationModules = %#v, want %#v",
+			auditOnlyApplicationModules, wantAuditOnly)
+	}
+}
+
+// TestLargeContextSwarmIsAuditOnly pins the swarm module's registry membership
+// while it ships documents and a manifest but no profiles: it participates in
+// the audit and stats gates and stays out of the runnable, build, and Go-test
+// registries until release 01.0 supplies executable evidence.
+func TestLargeContextSwarmIsAuditOnly(t *testing.T) {
+	const module = "applications/large-context-swarm"
+	if !contains(auditOnlyApplicationModules, module) {
+		t.Fatalf("auditOnlyApplicationModules = %#v, want it to include %s",
+			auditOnlyApplicationModules, module)
+	}
+	if contains(applicationModules, module) || contains(subModules, module) {
+		t.Fatalf("swarm registry membership is wrong: applications=%#v submodules=%#v",
+			applicationModules, subModules)
+	}
+	if !contains(auditParticipants(), module) {
+		t.Fatalf("auditParticipants() = %#v, want %s", auditParticipants(), module)
+	}
+	if !contains(statsParticipants(), module) {
+		t.Fatalf("statsParticipants() = %#v, want %s", statsParticipants(), module)
 	}
 }
 

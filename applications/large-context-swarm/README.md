@@ -30,26 +30,29 @@ flowchart TD
 
 ## Status
 
-The module status is `planned`. This directory currently holds the governance
-corpus — vision, architecture, road map, specification index, and this README —
-and nothing else. There are no profiles, no manifest, no Mage targets, and no
-root registration, so no capability is claimed and no command in this README runs
-yet.
+The module status is `audit_only`: the module owns its composition manifest and a
+local audit target, and participates in the repository's documentation and stats
+gates. It ships no profiles, so it contributes no agents and claims no runnable
+capability.
 
-Four releases are planned, and none is specified:
+Release 01.0 is specified; the other three are planned:
 
 | Release | Scope | Status |
 |---------|-------|--------|
-| 01.0 | Local blackboard loop | planned |
+| 01.0 | Local blackboard loop | specified |
 | 02.0 | Profile package and Helm topology | planned |
 | 03.0 | Provisioned swarm on kind with Job workers | planned |
 | 04.0 | Benchmark evidence | planned |
 
 ## Composition
 
-The application is agent-owning: `rlm-root` and `rlm-worker` are
-application-local profiles, not catalog members. Promotion would need a second
-consumer.
+`agents/application.yaml` is the composition authority. It reserves two local
+roots, `rlm-root` and `rlm-worker`, both marked `planned` until their profiles
+ship — the audit fails if a root claims to be planned once its profile exists, or
+claims to exist before it does.
+
+The application is agent-owning: both roots are application-local profiles, not
+catalog members. Promotion would need a second consumer.
 
 The blackboard itself is catalog-owned. The application consumes the
 knowledge-manager blocks and their Chroma REST operations by reference:
@@ -91,19 +94,30 @@ own task-scoped collection.
 
 ## Run or Planned Entry Points
 
-None yet. The planned entry points are the two local roots, `rlm-root` and
-`rlm-worker`, named in a manifest that does not exist yet, and the planned
-release 01.0 evidence target `mage integration:loop`, which will require a local
-Chroma and Ollama and skip with a recorded reason when either is absent.
+No program entry point exists. The two reserved roots, `rlm-root` and
+`rlm-worker`, are the planned ones, and release 01.0 adds the evidence target
+`mage integration:loop`, which requires a local Chroma and Ollama and skips with
+a recorded reason when either is absent.
+
+The current Mage entry points are governance only:
+
+- `mage audit`
+- `mage stats`
 
 ## Verification
 
-No local target runs yet. Until the module is registered at root, verification of
-this directory is limited to the repository-wide documentation gate:
+From `applications/large-context-swarm`:
 
 ```text
 mage audit
+mage stats
+go test ./magefiles
 ```
+
+The audit loads and validates the manifest, checks each reserved root against
+whether its profile exists, parses every local YAML document, checks the README
+sections, and rejects any document that claims an implemented release. Stats
+reports zero contributed agents while the roots stay planned.
 
 Release 01.0 adds `mage integration:loop`, which will ingest the fixture corpus,
 run the loop, and assert intent fan-out, worker filter usage, provenance tags on

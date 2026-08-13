@@ -38,7 +38,9 @@ var applicationModules = []string{
 // executable surface is limited to manifest/document audit and composition
 // accounting. They remain outside runnable, build, test, and release registries
 // until later runtime evidence supports promotion.
-var auditOnlyApplicationModules = []string{}
+var auditOnlyApplicationModules = []string{
+	"applications/large-context-swarm",
+}
 
 // auditParticipants lists every module the root audit gate dispatches to: the
 // platform submodules plus every application that owns a mage audit target.

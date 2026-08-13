@@ -201,6 +201,11 @@ local audit target, and root audit-only registration exist.
   reports structure-RAG as one composition wrapper over the canonical
   corpus-reader. Managed service, package, Helm, kind, and UI capabilities are
   `not_applicable`.
+- `large-context-swarm/`: agent-owning application at `audit_only` status. It
+  owns its manifest, documents, and a local audit target, and reserves the
+  `rlm-root` and `rlm-worker` roots as planned. It ships no profiles, so it
+  contributes zero agents and claims no runnable capability; release 01.0
+  supplies the first executable evidence.
 - `catalog/`: reusable catalog module, not a runnable application.
 
 Root Mage orchestration is the source of truth for participating modules.
