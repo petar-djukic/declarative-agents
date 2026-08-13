@@ -4,8 +4,8 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,18 +26,11 @@ const (
 	bodySourceCommandState   = "command_state"
 )
 
-type credentialResolutionError struct {
-	ref string
-}
-
-func (e credentialResolutionError) Error() string {
-	return fmt.Sprintf("credential ref %q is not resolved", e.ref)
-}
-
 // buildClientRequest renders one outbound request and returns the effective
 // declared params used to render it, so the caller can carry selected inputs
 // forward into the Result output (srd028 R12.3).
 func buildClientRequest(
+	ctx context.Context,
 	def ClientOperationDefinition,
 	input map[string]interface{},
 	resolver CredentialResolver,
@@ -56,7 +49,7 @@ func buildClientRequest(
 	if err != nil {
 		return nil, nil, err
 	}
-	req, err := http.NewRequest(def.Operation.Method, endpoint, body)
+	req, err := http.NewRequestWithContext(ctx, def.Operation.Method, endpoint, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -367,30 +360,6 @@ func bearerValue(scheme, token string) string {
 		scheme = "Bearer"
 	}
 	return scheme + " " + token
-}
-
-func resolveCredential(resolver CredentialResolver, ref string) (string, error) {
-	if ref == "" || resolver == nil {
-		return "", credentialResolutionError{ref: ref}
-	}
-	return resolver.ResolveCredential(ref)
-}
-
-func (c StaticCredentials) ResolveCredential(ref string) (string, error) {
-	value, ok := c[ref]
-	if !ok {
-		return "", credentialResolutionError{ref: ref}
-	}
-	return value, nil
-}
-
-func (EmptyCredentialResolver) ResolveCredential(ref string) (string, error) {
-	return "", credentialResolutionError{ref: ref}
-}
-
-func isCredentialResolutionError(err error) bool {
-	var target credentialResolutionError
-	return errors.As(err, &target)
 }
 
 func validateNetwork(endpoint *url.URL, policy NetworkPolicy) error {

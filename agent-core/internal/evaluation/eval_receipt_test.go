@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -66,6 +65,39 @@ func TestEvaluatorReceiptRemovesOwnedArtifactWithFreshCommand(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestEvaluatorReceiptRejectsArtifactOutsideOwnedRoot(t *testing.T) {
+	t.Parallel()
+
+	pointDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("keep"), 0o600))
+	pc := &PointContext{PointDir: pointDir, Sample: Sample{Name: "sample"}}
+	builder := &DumpConfigBuilder{ES: &EvalState{PC: pc}}
+	result := builder.Build(core.Result{}).Execute()
+	var receipt evaluatorReceipt
+	require.NoError(t, json.Unmarshal([]byte(result.Receipt), &receipt))
+	receipt.RemovePaths = []string{outside}
+	tampered, err := json.Marshal(receipt)
+	require.NoError(t, err)
+
+	undoResult := builder.BuildReverser().Undo(core.Result{Receipt: string(tampered)})
+
+	require.Equal(t, core.CommandError, undoResult.Signal)
+	require.FileExists(t, outside)
+}
+
+func TestCollectMetricsRejectsMissingPointDirectory(t *testing.T) {
+	t.Parallel()
+
+	command := (&CollectMetricsBuilder{
+		ES: &EvalState{PC: &PointContext{}},
+	}).Build(core.Result{})
+	result := command.Execute()
+
+	require.Equal(t, core.CommandError, result.Signal)
+	require.ErrorContains(t, result.Err, "PointContext.PointDir not initialized")
+}
+
 func TestRunAgentReceiptRestoresPointAndSurfacesChildCompensation(t *testing.T) {
 	t.Parallel()
 
@@ -76,7 +108,7 @@ func TestRunAgentReceiptRestoresPointAndSurfacesChildCompensation(t *testing.T) 
 	pc := &PointContext{
 		PointDir: pointDir, TracePath: filepath.Join(pointDir, "trace.ndjson"),
 		ResultPath: resultPath, ProfilePath: "agents/executor/profile.yaml",
-		Harness: Harness{Binary: script}, Timeout: 5 * time.Second,
+		Harness: Harness{Binary: script}, Timeout: schedulerSafeSubprocessTimeout,
 	}
 	builder := &RunAgentBuilder{ES: &EvalState{PC: pc, Ctx: context.Background()}}
 

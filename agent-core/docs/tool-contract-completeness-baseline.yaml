@@ -1,0 +1,6 @@
+# Tool-contract completeness baseline (GH-1525).
+#
+# Generated from spec.IncompleteToolContracts. This list is a ratchet: it may
+# shrink and must never grow. Do not edit entries manually.
+
+incomplete: []

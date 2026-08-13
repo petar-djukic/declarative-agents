@@ -92,17 +92,51 @@ func TestHermeticDependencyPullUsesExactOllamaDigest(t *testing.T) {
 				forbidden, dockerfile)
 		}
 	}
+	platform := "linux/" + runtime.GOARCH
+	recipe := "sha256:trusted-recipe"
+	buildArgs := strings.Join(
+		trustedOllamaBuildArgs(helmLLMOllamaImage, recipe, platform), " ")
+	for _, want := range []string{
+		"--platform " + platform,
+		"--provenance=false",
+		trustedOllamaRecipeLabel + "=" + recipe,
+		trustedOllamaPlatformLabel + "=" + platform,
+	} {
+		if !strings.Contains(buildArgs, want) {
+			t.Errorf("trusted Ollama build args missing %q: %s", want, buildArgs)
+		}
+	}
+	payload, _ := json.Marshal([]map[string]any{{
+		"Id": "sha256:trusted", "Os": "linux", "Architecture": runtime.GOARCH,
+		"Config": map[string]any{"Labels": map[string]string{
+			trustedOllamaRecipeLabel:   recipe,
+			trustedOllamaPlatformLabel: platform,
+		}},
+	}})
+	if imageID, matches := trustedOllamaInspectPayload(
+		payload, recipe, platform,
+	); !matches || imageID != "sha256:trusted" {
+		t.Fatalf("matching trusted Ollama inspect rejected: id=%q matches=%v",
+			imageID, matches)
+	}
+	if _, matches := trustedOllamaInspectPayload(
+		payload, "sha256:stale", platform,
+	); matches {
+		t.Fatal("stale trusted Ollama recipe was reused")
+	}
 }
 
 func TestHelmFailureEvidenceIsBoundedAndNamesRootCauses(t *testing.T) {
 	t.Run("diagnostic causes", func(t *testing.T) {
+		var commands []string
 		run := func(_ context.Context, name string, args ...string) ([]byte, error) {
 			command := name + " " + strings.Join(args, " ")
+			commands = append(commands, command)
 			switch {
 			case strings.Contains(command, "get events"):
 				return []byte("FailedScheduling: insufficient memory\nFailedMount: PVC is Pending\nErrImagePull: x509 certificate signed by unknown authority"), nil
 			case strings.Contains(command, `-o json`):
-				return []byte(`{"status":{"initContainerStatuses":[{"name":"wait-for-llm-models","state":{"waiting":{"reason":"PodInitializing"}}}],"containerStatuses":[{"name":"ollama","state":{"waiting":{"reason":"ImagePullBackOff"}}}]}}`), nil
+				return []byte(`{"items":[{"metadata":{"name":"smoke-chatbot-0"},"status":{"phase":"Pending","initContainerStatuses":[{"name":"wait-for-llm-models","restartCount":2,"state":{"waiting":{"reason":"PodInitializing","message":"models are not ready"}}}],"containerStatuses":[{"name":"chatbot","restartCount":3,"state":{"waiting":{"reason":"ImagePullBackOff","message":"pull failed"}},"lastState":{"terminated":{"exitCode":1,"reason":"Error","message":"invalid config"}}}]}}]}`), nil
 			case strings.Contains(command, "describe pods"):
 				return []byte("Readiness probe failed: connection refused"), nil
 			case strings.Contains(command, "logs"):
@@ -123,9 +157,24 @@ func TestHelmFailureEvidenceIsBoundedAndNamesRootCauses(t *testing.T) {
 			"Readiness probe failed",
 			"model pull failed",
 			"initContainerStatuses",
+			"pod/smoke-chatbot-0 init/wait-for-llm-models unready: state=waiting reason=PodInitializing",
+			"pod/smoke-chatbot-0 container/chatbot unready: state=waiting reason=ImagePullBackOff",
+			"last_terminated_reason=Error exit_code=1",
 		} {
 			if !strings.Contains(report, want) {
 				t.Errorf("failure evidence missing %q:\n%s", want, report)
+			}
+		}
+		joinedCommands := strings.Join(commands, "\n")
+		for _, want := range []string{
+			"kubectl logs pod/smoke-chatbot-0 -c wait-for-llm-models --tail=120",
+			"kubectl logs pod/smoke-chatbot-0 -c wait-for-llm-models --tail=120 --previous",
+			"kubectl logs pod/smoke-chatbot-0 -c chatbot --tail=120",
+			"kubectl logs pod/smoke-chatbot-0 -c chatbot --tail=120 --previous",
+		} {
+			if !strings.Contains(joinedCommands, want) {
+				t.Errorf("per-container log diagnostics missing %q:\n%s",
+					want, joinedCommands)
 			}
 		}
 		data, err := os.ReadFile(filepath.Join(dir, "bounded-diagnostics.txt"))
@@ -739,6 +788,28 @@ func TestAssertSmokeChatServedAcceptsAnswer(t *testing.T) {
 	}
 }
 
+func TestAssertLLMChatServedRequestsABoundedAnswer(t *testing.T) {
+	var message string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode chat request: %v", err)
+		}
+		message = request.Message
+		_, _ = w.Write([]byte(`{"answer":"Northwind array: fifty-five megawatts."}`))
+	}))
+	defer srv.Close()
+
+	if err := assertLLMChatServed(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, "five words") {
+		t.Fatalf("LLM benchmark prompt is not output-bounded: %q", message)
+	}
+}
+
 func TestHelmSmokeSkipReasonMissingBinary(t *testing.T) {
 	// With an empty PATH none of the required binaries resolve, so the smoke test
 	// records a skip for the first missing tool rather than attempting a run.
@@ -769,6 +840,11 @@ func TestChatbotRolloutDrainsActiveRequests(t *testing.T) {
 	} {
 		if !strings.Contains(render, want) {
 			t.Errorf("rendered chatbot rollout contract missing %q", want)
+		}
+	}
+	for _, line := range strings.Split(render, "\n") {
+		if strings.TrimSpace(line) == "drain_policy: drain" {
+			t.Fatal("rendered chatbot REST config uses unsupported drain policy")
 		}
 	}
 }

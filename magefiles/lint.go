@@ -3,9 +3,12 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 var lintModuleDirs = []string{
@@ -19,6 +22,8 @@ var lintModuleDirs = []string{
 	"applications/prose-editor",
 	"design-patterns/magefiles",
 }
+
+const lintConcurrency = 2
 
 type lintRunner func(string) error
 
@@ -35,23 +40,76 @@ func Lint() error {
 	if err := checkGolangciLint(); err != nil {
 		return err
 	}
-	return lintSubModules(lintModuleDirs, runGolangciLint)
+	return lintSubModulesLimited(lintModuleDirs, lintConcurrency, runGolangciLint)
 }
 
 func lintSubModules(modules []string, run lintRunner) error {
-	for _, module := range modules {
+	return lintSubModulesLimited(modules, 1, run)
+}
+
+func lintSubModulesLimited(modules []string, limit int, run lintRunner) error {
+	return runBounded(modules, limit, func(module string) error {
 		fmt.Printf("=== %s lint ===\n", module)
 		if err := run(module); err != nil {
 			return fmt.Errorf("lint in %s: %w", module, err)
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func runGolangciLint(dir string) error {
-	cmd := exec.Command("golangci-lint", "run", "./...")
-	cmd.Dir = dir
+	cmd, err := golangciLintCommand(dir)
+	if err != nil {
+		return err
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func golangciLintCommand(dir string) (*exec.Cmd, error) {
+	root, err := findRepositoryRoot()
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository root for lint cache: %w", err)
+	}
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve user cache for golangci-lint: %w", err)
+	}
+	cacheDir := golangciLintModuleCacheDir(cacheRoot, root, dir)
+	cmd := exec.Command("golangci-lint", "run", "--allow-parallel-runners", "./...")
+	cmd.Dir = filepath.Join(root, filepath.FromSlash(dir))
+	cmd.Env = lintCommandEnvironment(os.Environ(), cacheDir)
+	return cmd, nil
+}
+
+func golangciLintCacheDir(cacheRoot, repositoryRoot string) string {
+	canonical := filepath.Clean(repositoryRoot)
+	digest := sha256.Sum256([]byte(canonical))
+	namespace := fmt.Sprintf("%x", digest[:12])
+	return filepath.Join(
+		cacheRoot, "declarative-agents", "golangci-lint", namespace)
+}
+
+func golangciLintModuleCacheDir(cacheRoot, repositoryRoot, module string) string {
+	return filepath.Join(
+		golangciLintCacheDir(cacheRoot, repositoryRoot),
+		filepath.FromSlash(module),
+	)
+}
+
+func lintCommandEnvironment(inherited []string, cacheDir string) []string {
+	const key = "GOLANGCI_LINT_CACHE"
+	environment := make([]string, 0, len(inherited)+1)
+	for _, entry := range inherited {
+		if name, _, _ := strings.Cut(entry, "="); name == key {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, key+"="+cacheDir)
 }
