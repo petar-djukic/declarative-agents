@@ -1,0 +1,184 @@
+id: test-rel01.0-blackboard-loop
+title: Test Suite for Release 01.0 Local Blackboard Loop
+release: "01.0"
+status: specified
+
+overview: |
+  This suite proves the loop against a real Chroma and a real Ollama, because
+  the properties under test are properties of what actually reached the store and
+  what actually entered a context. A fixture double would let the assertions pass
+  against a protocol transcript the implementation never has to satisfy.
+
+  The fixture corpus is built so that no single document answers the question and
+  no single vector query retrieves every document the answer needs. That is what
+  makes the fan-out and the rounds meaningful: a corpus one worker could cover
+  would prove the plumbing and nothing about the mechanism.
+
+  The handle-discipline case is the one that decides whether the release is what
+  it claims. It reads the root's own transcript and trace and fails if any
+  fixture document sentence appears there — a run that answers correctly while
+  leaking corpus text into the root has not demonstrated the mechanism.
+
+traces:
+  - rel01.0-uc001-blackboard-loop
+
+preconditions:
+  - A Chroma server is reachable at the address the application declarations bind, started by the harness or operator.
+  - An Ollama server is reachable with the configured embedding and reasoning models pulled.
+  - The fixture corpus under testdata/integration/ carries a known answer spanning at least three documents, and a sentinel substring that appears in exactly one document.
+  - The integration target reports a skip with a recorded reason when either server is absent, rather than failing.
+
+test_cases:
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Ingest creates the per-task collection with corpus provenance
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      The application ingests the fixture corpus into the collection the task
+      intent names. Every ingested record carries source corpus, so a later
+      provenance filter can separate documents from findings.
+    inputs:
+      collection: task-scoped name from the task intent
+      corpus: testdata/integration fixture documents
+    expected:
+      named_collection_created: true
+      ingested_records_tagged_source_corpus: true
+      record_count_matches_fixture: true
+    traces:
+      - srd001-blackboard-loop AC4
+      - srd001-blackboard-loop R4.1
+      - srd001-blackboard-loop R4.2
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: One task intent fans out to at least two workers
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      The root emits at least two sub-intents from the single task intent and one
+      worker runs per sub-intent. The count of workers started equals the count
+      of sub-intents emitted — a worker that never ran is a finding that never
+      arrives, and the root must not silently proceed with fewer.
+    inputs:
+      task_intent: the fixture's multi-hop question
+      round_bound: declared in the task intent
+    expected:
+      sub_intents_emitted_at_least: 2
+      workers_started_equals_sub_intents: true
+      sub_intent_carries_no_document_text: true
+    traces:
+      - srd001-blackboard-loop AC1
+      - rel01.0-uc001-blackboard-loop S1
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Worker queries use exact-substring and provenance filters
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      At least one worker query carries a where_document $contains filter naming
+      the fixture sentinel, and at least one carries a where provenance filter.
+      Asserted from request evidence rather than from the worker's own report, so
+      a worker that claims a filter it did not send fails.
+    inputs:
+      sentinel_substring: appears in exactly one fixture document
+    expected:
+      where_document_contains_observed: true
+      where_provenance_filter_observed: true
+      vector_query_observed: true
+    traces:
+      - srd001-blackboard-loop AC2
+      - rel01.0-uc001-blackboard-loop S2
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Each worker writes exactly one tagged finding and terminates
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      Every derived entry carries source derived, the writing agent's identity,
+      and the round. The number of derived entries for a round equals the number
+      of workers that round started, so neither a silent worker nor a worker that
+      wrote twice passes. Every worker process reaches a terminal state.
+    inputs:
+      round: the round under assertion
+    expected:
+      derived_entries_per_round_equals_workers: true
+      every_derived_entry_tagged: [source, agent, round]
+      worker_processes_terminated: true
+      worker_finding_is_not_a_verbatim_chunk: true
+    traces:
+      - srd001-blackboard-loop AC2
+      - rel01.0-uc001-blackboard-loop S3
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: The root transcript and trace contain no corpus document text
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      The root's transcript and its trace are searched for every fixture
+      document's distinctive sentences. None appears. Record identities and tag
+      values do appear, which is what distinguishes this from a root that simply
+      produced no output.
+    inputs:
+      forbidden: distinctive sentences from each fixture document
+      required: record identities and tag values from the round queries
+    expected:
+      fixture_document_text_in_root_transcript: false
+      fixture_document_text_in_root_trace: false
+      record_identities_present: true
+    traces:
+      - srd001-blackboard-loop AC5
+      - rel01.0-uc001-blackboard-loop S4
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Reduction writes one Final entry with the multi-hop answer
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      Exactly one Final entry exists at the end of the run. It contains the known
+      answer, which no single fixture document states, and it names the record
+      identities of the findings it reduced.
+    inputs:
+      known_answer: the fixture's recorded multi-hop answer
+    expected:
+      final_entry_count: 1
+      final_entry_contains_known_answer: true
+      final_entry_names_reduced_record_ids: true
+      root_terminal_state: Succeeded
+    traces:
+      - srd001-blackboard-loop AC3
+      - rel01.0-uc001-blackboard-loop S5
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Rounds stay within the bound and teardown deletes the collection
+    integration_target: mage integration:loop
+    status: specified
+    description: |
+      The run uses at most the declared number of rounds, and reaching the bound
+      terminates through the reduction path rather than a failure. After
+      teardown, the per-task collection no longer exists, so a second run of the
+      same task cannot read the first run's findings.
+    inputs:
+      round_bound: declared in the task intent
+    expected:
+      rounds_run_at_most_bound: true
+      bound_reached_terminates_through_reduction: true
+      collection_absent_after_teardown: true
+      final_read_before_teardown: true
+    traces:
+      - srd001-blackboard-loop AC3
+      - srd001-blackboard-loop AC4
+      - rel01.0-uc001-blackboard-loop S6
+
+  - use_case: rel01.0-uc001-blackboard-loop
+    name: Storage behavior resolves to catalog declarations
+    integration_target: cd ../.. && mage audit
+    status: specified
+    description: |
+      The application's blackboard reads and writes bind catalog operations and
+      the catalog memory-write block by reference. No application file copies a
+      catalog declaration, and both swarm profiles are application-local rather
+      than catalog members.
+    expected:
+      blackboard_operations_referenced_not_copied: true
+      swarm_profiles_are_application_local: true
+    traces:
+      - srd001-blackboard-loop AC6

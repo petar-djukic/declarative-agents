@@ -111,13 +111,15 @@ components:
       exact-substring filtered queries. Catalog-owned; the application configures
       the collection name and the filters.
   - name: corpus ingest
-    source: applications/catalog/agents/knowledge-manager/corpus-ingest/
-    library_requirement: applications/catalog/docs/specs/software-requirements/srd012-chroma-corpus-agents.yaml
-    status: implemented
+    path: agents/
+    status: planned
     responsibility: |
       Load the fixture corpus into the per-task collection before the loop
-      starts. Catalog-owned; the application supplies the corpus and the
-      collection identity.
+      starts, tagging each document source corpus. Application-owned over the
+      catalog blackboard operations: the canonical catalog corpus-ingest block
+      writes the fixed corpus collection that catalog srd023 R5.1 keeps
+      unchanged, so it cannot name a per-task collection. The application reuses
+      the operations rather than the block (srd001-blackboard-loop R4.2).
   - name: memory-write
     source: applications/catalog/agents/knowledge-manager/memory-write/
     library_requirement: applications/catalog/docs/specs/software-requirements/srd023-blackboard-memory.yaml

@@ -2,10 +2,10 @@ id: large-context-swarm-specifications
 title: Large Context Swarm Specification Index
 
 overview: |
-  This index covers the governance corpus for the large context swarm. Four
-  releases are planned; none is specified yet. The release 01.0 SRD, use case,
-  and test suite are the next documents to land, and they are what the profiles
-  and the integration evidence implement.
+  This index covers the governance corpus for the large context swarm and the
+  release 01.0 specification set. Four releases are planned; 01.0 is specified.
+  Its SRD, use case, and test suite are the contract the profiles and the
+  integration evidence implement.
 
   Shared application requirements and catalog family requirements stay external.
   Local documents cite them and define only this application's loop, its actor
@@ -16,8 +16,8 @@ roadmap_summary:
     name: Local blackboard loop
     use_cases_done: 0
     use_cases_total: 1
-    status: planned
-    evidence: No specifications or executable evidence exist; the release 01.0 SRD, use case, and test suite are the next deliverable.
+    status: specified
+    evidence: One SRD with six requirement groups, one use case, and one eight-case test suite are documented; no executable evidence exists.
   - version: "02.0"
     name: Profile package and Helm topology
     use_cases_done: 0
@@ -41,33 +41,50 @@ foundation_document_index:
   - id: large-context-swarm-readme
     title: Large Context Swarm
     summary: Human entry point — the mechanism, the actor boundaries, planned entry points, and truthful status.
-    status: planned
+    status: specified
     path: README.md
   - id: large-context-swarm
     title: "Large Context Swarm: Recursive Language Models as a Declarative Swarm"
     summary: Problem, mechanism, actor boundaries with their justifications, success criteria, and exclusions.
-    status: planned
+    status: specified
     path: docs/VISION.yaml
   - id: architecture-large-context-swarm
     title: Large Context Swarm Architecture
     summary: Components, interfaces, the context boundary, decisions of record, technology choices, and source layout.
-    status: planned
+    status: specified
     path: docs/ARCHITECTURE.yaml
   - id: large-context-swarm-roadmap
     title: Large Context Swarm Road Map
     summary: Four planned releases from the local loop to measured benchmark evidence, each with its integration gate.
     path: docs/road-map.yaml
-    status: planned
+    status: specified
 
-srd_index: []
+srd_index:
+  - id: srd001-blackboard-loop
+    title: Blackboard Loop — Root Intents, Ephemeral Workers, and Reduction
+    status: specified
+    summary: What each root state may see, the one-intent one-finding worker, the round bound and terminal reduction, the task-scoped collection lifecycle, handle discipline as a machine invariant, and the catalog composition boundary.
+    path: docs/specs/software-requirements/srd001-blackboard-loop.yaml
+    use_cases: [rel01.0-uc001-blackboard-loop]
+    test_suites: [test-rel01.0-blackboard-loop]
 
 config_format_index: []
 
 semantic_model_index: []
 
-use_case_index: []
+use_case_index:
+  - id: rel01.0-uc001-blackboard-loop
+    title: A Task Intent Becomes Searched Findings and One Final Entry
+    status: specified
+    summary: Ingest, root fan-out, worker search and tagged write-back, provenance-filtered collection, bounded rounds, reduction to one Final entry, and teardown.
+    path: docs/specs/use-cases/rel01.0-uc001-blackboard-loop.yaml
 
-test_suite_index: []
+test_suite_index:
+  - id: test-rel01.0-blackboard-loop
+    title: Test Suite for Release 01.0 Local Blackboard Loop
+    status: specified
+    summary: Eight cases against real Chroma and Ollama — ingest provenance, fan-out, filter usage, tagged findings, root handle discipline, the Final entry, round bound and teardown, and the catalog composition boundary.
+    path: docs/specs/test-suites/test-rel01.0-blackboard-loop.yaml
 
 external_references:
   note: |
@@ -88,12 +105,13 @@ external_references:
       summary: The Chroma corpus family, its REST vocabulary, and the provider-embedding threading contract the blackboard inherits.
 
 coverage_gaps: |
-  Every release is planned and nothing is specified, so the corpus currently
-  states intent and boundaries only. The concrete gaps, in the order they close:
+  One release of four is specified and none is implemented. The concrete gaps,
+  in the order they close:
 
-  Release 01.0 has no SRD, use case, or test suite. Until they exist there is no
-  contract for the root and worker machines, and the handle-discipline invariant
-  is prose in the vision rather than a numbered requirement with a test case.
+  Release 01.0 is specified and unimplemented. There are no profiles, so every
+  case in its suite is a contract rather than evidence, and the
+  handle-discipline invariant is a numbered requirement whose assertion has
+  nothing to run against yet.
 
   The module is not registered at root, so it does not yet participate in root
   audit, test, stats, or release orchestration, and it owns no manifest. Until

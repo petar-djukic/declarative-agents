@@ -1,0 +1,110 @@
+id: rel01.0-uc001-blackboard-loop
+title: A Task Intent Becomes Searched Findings and One Final Entry
+
+summary: |
+  A requester supplies one task question and a corpus fixture. The application
+  ingests the corpus into a per-task collection, the root turns the question into
+  search intents, one worker runs per intent and writes one provenance-tagged
+  finding, and the root reads each round's findings by their tags, decides
+  whether the round bound allows another round, and reduces what it has into a
+  Final entry. Teardown deletes the collection.
+
+  The answer spans several documents, so no single retrieval returns it. What
+  makes the run interesting is what the root never sees: its context holds
+  intents, record identities, tag values, and its own reduction, and never a
+  chunk of the corpus.
+
+actor: A requester asking a multi-document question about a corpus too large for one context window.
+
+trigger: |
+  The requester submits a task intent naming the question, the corpus fixture,
+  the per-task collection name, and the round bound.
+
+preconditions:
+  - A Chroma server is running against a persistence directory, started by the harness or operator, not by an agent.
+  - An Ollama server is reachable and has the configured embedding and reasoning models pulled.
+  - The catalog blackboard operations and the memory-write block are available at the compatible catalog release.
+  - The corpus fixture holds the answer across several documents, so no single document answers the question.
+
+flow:
+  - id: F1
+    text: The application ingests the corpus fixture into the collection named by the task intent, tagging each document source corpus.
+  - id: F2
+    text: The root receives the task intent and emits at least two sub-intents, each a search instruction carrying no document content.
+  - id: F3
+    text: The root starts one worker per sub-intent and passes exactly one sub-intent to each.
+  - id: F4
+    text: Each worker searches the collection — by vector similarity, and by exact substring or provenance where its intent calls for it — reduces what it retrieved, and writes one finding tagged source derived with its agent identity and the round.
+  - id: F5
+    text: Each worker terminates after its write, discarding the retrieved chunks with its context.
+  - id: F6
+    text: The root queries the collection for the round's derived entries by provenance filter and receives record identities and metadata.
+  - id: F7
+    text: Within the round bound, the root derives the next round's sub-intents from the previous round's findings and repeats F3 through F6; at the bound, or when it judges the findings sufficient, it stops.
+  - id: F8
+    text: The root reduces the accumulated findings into one Final entry naming the answer and the record identities it reduced, reaches Succeeded, and the requester reads the Final entry before teardown deletes the collection.
+
+touchpoints:
+  - id: T1
+    target: srd001-blackboard-loop AC1
+    reason: The root fans one task intent out to workers and reads each round back by provenance rather than by content.
+  - id: T2
+    target: srd001-blackboard-loop AC2
+    reason: A worker takes one intent, searches three ways, writes one tagged finding, and terminates.
+  - id: T3
+    target: srd001-blackboard-loop AC3
+    reason: Rounds are bounded and the loop terminates by writing one Final entry.
+  - id: T4
+    target: srd001-blackboard-loop AC4
+    reason: The collection is named from the task intent, ingested by the application, read before teardown, and deleted after.
+  - id: T5
+    target: srd001-blackboard-loop AC5
+    reason: The root's declared inputs and its real transcript exclude corpus document text.
+  - id: T6
+    target: applications/catalog srd023-blackboard-memory AC1, AC2, AC3, AC4
+    reason: Named collections, provenance metadata, filtered reads, and the memory-write handle contract are consumed from the catalog rather than reimplemented.
+  - id: T7
+    target: architecture-large-context-swarm design_decisions 2, 3
+    reason: The flow coordinates through the store and treats handle discipline as a machine invariant.
+
+success_criteria:
+  - id: S1
+    criterion: The root emits at least two sub-intents from one task intent, and one worker runs per sub-intent.
+    traces:
+      - srd001-blackboard-loop R1.2
+      - srd001-blackboard-loop R1.3
+  - id: S2
+    criterion: Worker queries reach Chroma carrying a where_document $contains filter and a where provenance filter, not vector similarity alone.
+    traces:
+      - srd001-blackboard-loop R2.2
+      - applications/catalog srd023-blackboard-memory R3.1
+      - applications/catalog srd023-blackboard-memory R3.2
+  - id: S3
+    criterion: Every derived entry in the collection carries source derived, its writing agent, and its round; the count of derived entries for a round equals the number of workers that round started.
+    traces:
+      - srd001-blackboard-loop R2.3
+      - srd001-blackboard-loop R2.5
+  - id: S4
+    criterion: The root's transcript and trace contain record identities and tag values and contain no text from any fixture document.
+    traces:
+      - srd001-blackboard-loop R5.1
+      - srd001-blackboard-loop R5.2
+  - id: S5
+    criterion: Exactly one Final entry exists at the end of the run, it answers the question the fixture spreads across documents, and it names the record identities it reduced.
+    traces:
+      - srd001-blackboard-loop R3.3
+  - id: S6
+    criterion: The run uses at most the declared number of rounds, and the per-task collection does not exist after teardown.
+    traces:
+      - srd001-blackboard-loop R3.1
+      - srd001-blackboard-loop R4.3
+
+out_of_scope:
+  - Provisioning workers as Kubernetes Jobs, which is release 03.0.
+  - Packaging the profile closure or rendering a chart, which is release 02.0.
+  - Scoring the answer or reporting cost, which is release 04.0.
+  - Changing catalog blackboard or corpus behavior.
+  - Retaining any state between tasks.
+
+test_suite: test-rel01.0-blackboard-loop
+status: specified

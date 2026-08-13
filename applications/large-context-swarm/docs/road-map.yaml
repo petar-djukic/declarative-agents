@@ -32,15 +32,18 @@ releases:
       - applications/catalog srd023-blackboard-memory
       - applications/catalog srd012-chroma-corpus-agents
     application_srds:
-      - srd001-blackboard-loop
+      - id: srd001-blackboard-loop
+        summary: Root intents and handle discipline, the one-intent worker, bounded rounds and reduction, the task-scoped collection, and the catalog composition boundary.
+        status: specified
     use_cases:
       - id: rel01.0-uc001-blackboard-loop
         summary: A task intent becomes searched findings and one Final entry without the corpus entering the root's context.
-        status: planned
+        status: specified
     test_suites:
       - id: test-rel01.0-blackboard-loop
-        summary: Intent fan-out, worker filter usage, provenance tags, root handle discipline, Final entry content, and collection teardown.
-        status: planned
+        summary: Eight cases — ingest provenance, intent fan-out, worker filter usage, tagged findings, root handle discipline, Final entry content, round bound and teardown, and the composition boundary.
+        cases: 8
+        status: specified
     integration_gate: |
       Local Chroma and Ollama, with a documented skip when either is absent.
 

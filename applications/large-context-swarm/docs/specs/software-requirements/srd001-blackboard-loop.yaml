@@ -1,0 +1,159 @@
+id: srd001-blackboard-loop
+title: Blackboard Loop — Root Intents, Ephemeral Workers, and Reduction
+status: specified
+
+context: |
+  The application answers one task about a corpus that does not fit in a context
+  window. The corpus and every derived finding live in one per-task Chroma
+  collection reached through the catalog blackboard operations (catalog srd023).
+  A root program plans and reduces; ephemeral worker programs search and write.
+
+  This SRD owns the loop: what the root may see, what a worker does with one
+  intent, how rounds terminate, when the collection exists, and where the
+  handle-discipline invariant is enforced. It does not restate the storage
+  contract — collection naming, provenance metadata, filtered reads, and the
+  memory-write handle discipline are catalog srd023 R1 through R4, and the
+  provider-embedding threading is catalog srd012 R3.
+
+problem: |
+  The property that makes the mechanism work is negative: the root's context
+  never receives document text. A negative property stated in prose is not
+  checkable, and a loop assembled without stating it will acquire the opposite
+  behavior the first time a convenient query result is threaded into a planning
+  prompt.
+
+  The loop also has to terminate. A root that emits intents, reads findings, and
+  emits more intents has no natural stopping point, and a corpus large enough to
+  need this mechanism is large enough that "until the question is answered" is
+  not a bound a machine can evaluate.
+
+goals:
+  - G1: State what each root state may receive, so handle discipline is a machine invariant rather than a convention.
+  - G2: Define the worker as a one-intent, one-finding, run-to-completion program.
+  - G3: Bound the rounds and define the terminal reduction.
+  - G4: Scope the collection's lifetime to the task.
+  - G5: Keep storage behavior catalog-owned and referenced.
+
+requirements:
+  - id: R1
+    title: Root planning and coordination
+    items:
+      - id: R1.1
+        text: The root shall accept exactly one task intent as request input, naming the task question, the per-task collection, the corpus fixture to ingest, and the round bound. No part of the task intent shall be model-authored.
+      - id: R1.2
+        text: The root shall emit at least two sub-intents from the task intent. A sub-intent is a search instruction — query text, and where the round's provenance filter applies — and carries no document content.
+      - id: R1.3
+        text: The root shall start one worker per sub-intent and shall pass exactly one sub-intent to each worker. A worker shall not receive another worker's findings.
+      - id: R1.4
+        text: After a round, the root shall query the collection for that round's derived entries using a where filter on source and round, and shall consume record identities and metadata values.
+      - id: R1.5
+        text: The root shall own the round bound, the decision to run another round, and the content of the Final entry. No worker shall influence any of the three.
+  - id: R2
+    title: Worker search and write
+    items:
+      - id: R2.1
+        text: A worker shall be seeded with exactly one sub-intent as request input and shall terminate after acting on it.
+      - id: R2.2
+        text: A worker shall search the per-task collection by vector similarity, and shall be able to select records by exact substring through where_document $contains and by provenance through where, per catalog srd023 R3.
+      - id: R2.3
+        text: A worker shall write exactly one finding through the catalog memory-write block, tagged source derived with its agent identity and the current round, per catalog srd023 R2 and R4.
+      - id: R2.4
+        text: A worker's finding shall be its own reduction of what it retrieved. A worker shall not write retrieved chunks back verbatim as its finding.
+      - id: R2.5
+        text: A worker that retrieves nothing shall write a finding recording the empty result rather than terminating silently, so the root can distinguish an absent finding from a negative one.
+  - id: R3
+    title: Rounds and termination
+    items:
+      - id: R3.1
+        text: The root shall run at most the declared bound of rounds. Reaching the bound shall terminate the loop through the reduction path, not through a failure path.
+      - id: R3.2
+        text: A round after the first shall derive its sub-intents from the previous round's findings, selected by the where filter on source derived and the previous round number.
+      - id: R3.3
+        text: Termination shall write exactly one Final entry to the collection, containing the answer to the task intent and the record identities of the findings it reduced.
+      - id: R3.4
+        text: The root shall reach a Succeeded terminal state when a Final entry is written, and a Failed terminal state when ingest, a boundary word, or the reduction fails. Worker failure shall not by itself fail the run.
+  - id: R4
+    title: Collection lifecycle
+    items:
+      - id: R4.1
+        text: The collection name shall identify the task and shall come from the task intent, not from a literal in a declaration.
+      - id: R4.2
+        text: Ingest shall be application-owned and shall load the corpus into the named collection tagged source corpus, because the canonical catalog corpus-ingest block writes the fixed corpus collection that catalog srd023 R5.1 keeps unchanged.
+      - id: R4.3
+        text: Teardown shall delete the per-task collection. A completed run shall leave no collection a later run can read.
+      - id: R4.4
+        text: The Final entry shall be read from the collection before teardown; teardown shall not be the step that reports the answer.
+  - id: R5
+    title: Handle discipline
+    items:
+      - id: R5.1
+        text: No root state shall declare stored document content among its inputs. The root machine shall state, per state, what that state may receive.
+      - id: R5.2
+        text: The root's transcript and trace shall contain record identities, tag values, counts, and its own sub-intent and Final text, and shall contain no corpus document text.
+      - id: R5.3
+        text: A worker's context is the only place retrieved chunks appear, and it shall be discarded when the worker terminates.
+      - id: R5.4
+        text: The size of the root's inputs shall depend on the number of findings and the round bound, and shall not depend on the size of the corpus.
+  - id: R6
+    title: Composition boundary
+    items:
+      - id: R6.1
+        text: Blackboard reads and writes shall use the catalog operations and the memory-write block by reference. The application shall not fork them or copy their declarations.
+      - id: R6.2
+        text: rlm-root and rlm-worker shall be application-local profiles. Promotion to the catalog requires a second consumer.
+      - id: R6.3
+        text: The application shall treat a running Chroma and a reachable Ollama as external preconditions surfaced through readiness words, per catalog srd012 R5.1.
+
+non_goals:
+  - Restating catalog srd023 or srd012 storage, metadata, or threading behavior.
+  - Specifying how workers are provisioned; release 01.0 runs them locally and release 03.0 runs them as Kubernetes Jobs without changing the machines.
+  - Scoring answer quality; release 04.0 owns benchmark evidence.
+  - Persisting findings between tasks, or any retention policy other than teardown.
+  - Prescribing the model or embedding model beyond what the catalog declarations name.
+
+acceptance_criteria:
+  - id: AC1
+    criterion: The root turns one task intent into at least two sub-intents, starts one worker per sub-intent, and reads each round's results back by provenance filter rather than by content.
+    traces: [R1.1, R1.2, R1.3, R1.4, R1.5]
+  - id: AC2
+    criterion: Each worker acts on exactly one intent, can select records by vector, exact substring, and provenance, writes exactly one tagged finding that is its own reduction, and terminates.
+    traces: [R2.1, R2.2, R2.3, R2.4, R2.5]
+  - id: AC3
+    criterion: The loop runs at most the declared number of rounds and terminates by writing one Final entry that names the findings it reduced.
+    traces: [R3.1, R3.2, R3.3, R3.4]
+  - id: AC4
+    criterion: The per-task collection is named from the task intent, ingested by the application with source corpus tags, read before teardown, and deleted after.
+    traces: [R4.1, R4.2, R4.3, R4.4]
+  - id: AC5
+    criterion: The root machine declares per-state inputs that exclude document content, and a real run's root transcript and trace contain no corpus document text.
+    traces: [R5.1, R5.2, R5.3, R5.4]
+  - id: AC6
+    criterion: The application's storage behavior resolves to catalog declarations, and both swarm profiles are application-local.
+    traces: [R6.1, R6.2, R6.3]
+
+depends_on:
+  - srd_id: applications/catalog srd023-blackboard-memory
+    symbols_used: [R1, R2, R3, R4, R5]
+  - srd_id: applications/catalog srd012-chroma-corpus-agents
+    symbols_used: [R3, R5]
+  - srd_id: applications/docs srd001-application-module-contract
+    symbols_used: [R1]
+
+diagrams:
+  requirements_trace: |
+    ```mermaid
+    flowchart LR
+      Problem["Problem: the property is negative and the loop needs a bound"] --> Goals["Goals: Blackboard Loop"]
+      Goals --> R1["R1: Root planning and coordination"]
+      Goals --> R2["R2: Worker search and write"]
+      Goals --> R3["R3: Rounds and termination"]
+      Goals --> R4["R4: Collection lifecycle"]
+      Goals --> R5["R5: Handle discipline"]
+      Goals --> R6["R6: Composition boundary"]
+      R1 --> AC1["AC1: Intents out, handles in"]
+      R2 --> AC2["AC2: One intent, one finding, exit"]
+      R3 --> AC3["AC3: Bounded rounds, one Final"]
+      R4 --> AC4["AC4: Task-scoped collection"]
+      R5 --> AC5["AC5: No corpus text in the root"]
+      R6 --> AC6["AC6: Catalog behavior referenced"]
+    ```
