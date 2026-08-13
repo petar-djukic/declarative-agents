@@ -1,0 +1,253 @@
+id: architecture-large-context-swarm
+title: Large Context Swarm Architecture
+
+capability_classification:
+  ownership: agent-owning
+  module_status: planned
+  agents_contributed: 0
+  composition_wrappers: []
+
+overview:
+  summary: |
+    The swarm is two application-local programs over one catalog-owned store.
+    rlm-root plans, delegates, collects, and reduces. rlm-worker searches and
+    writes one finding. The blackboard is a per-task Chroma collection reached
+    through the catalog knowledge-manager blocks and REST operations.
+
+    The root and the workers never exchange content directly. A worker is seeded
+    with an intent, and what it produces reaches the root as a record identity
+    and its metadata. That indirection is what keeps the root's context size
+    independent of the corpus size, and it is why the store, rather than a
+    message path, is the coordination boundary.
+
+    Releases 01.0 through 04.0 move the same loop from local processes to
+    provisioned Kubernetes Jobs without changing the machines: a worker that
+    terminates after one intent is already shaped like a run-to-completion Job.
+  status: planned
+  loop_diagram: |
+    ```mermaid
+    flowchart TD
+      H[Task intent] --> R[rlm-root]
+      C[(Corpus fixture)] -->|ingest| B[(Per-task blackboard collection)]
+      R -->|intent 1..N| W1[rlm-worker]
+      R --> W2[rlm-worker]
+      R --> WN[rlm-worker]
+      B -->|retrieved chunks| W1
+      B --> W2
+      B --> WN
+      W1 -->|tagged finding| B
+      W2 --> B
+      WN --> B
+      B -->|record ids, tags, counts| R
+      R -->|another round, within bound| R
+      R -->|Final entry| B
+      B --> A[Answer read by the requester]
+    ```
+  context_boundary_diagram: |
+    ```mermaid
+    flowchart LR
+      subgraph root[rlm-root context]
+        I[intents] --- M[record ids and tags] --- F[Final text]
+      end
+      subgraph worker[rlm-worker context, discarded at exit]
+        Q[one intent] --- D[retrieved document chunks] --- N[one finding]
+      end
+      D -. never crosses .-> root
+    ```
+
+interfaces:
+  - name: task intent
+    summary: |
+      The application input names the task question, the corpus fixture to
+      ingest, the per-task collection name, and the round bound. It is request
+      input, not model-authored text.
+  - name: root-to-worker delegation
+    summary: |
+      The root starts one worker per intent and passes exactly one intent. The
+      worker receives no corpus text and no other worker's findings; what it can
+      reach, it reaches by querying the collection itself.
+  - name: worker finding write
+    summary: |
+      A worker writes one entry through the catalog memory-write block, tagged
+      source derived with its agent identity and round. The write returns a
+      record id; the block never echoes stored content (catalog srd023 R4.4).
+  - name: root collection read
+    summary: |
+      The root queries the collection with a provenance filter selecting the
+      current round's derived entries, and consumes identities and metadata. Its
+      declared inputs exclude document text.
+  - name: final entry
+    summary: |
+      The reduce step writes one entry tagged as the task's Final result. The
+      requester reads the answer from the collection by that handle.
+  - name: collection lifecycle
+    summary: |
+      Ingest creates the per-task collection; teardown deletes it. Both are
+      application-owned steps around the catalog blocks.
+
+components:
+  - name: rlm-root
+    path: agents/rlm-root/
+    status: planned
+    responsibility: |
+      Accept one task intent, emit sub-intents, delegate to workers, query each
+      round's derived entries by provenance, decide whether the round bound
+      allows another round, and reduce the accumulated findings into the Final
+      entry. Application-owned; realizes planning and coordination roles.
+  - name: rlm-worker
+    path: agents/rlm-worker/
+    status: planned
+    responsibility: |
+      Take one intent, search the per-task collection by vector similarity, by
+      exact substring, and by provenance filter, write one tagged finding, and
+      terminate. Application-owned; realizes knowledge and actuation roles.
+  - name: blackboard collection
+    source: applications/catalog/agents/knowledge-manager/
+    library_requirement: applications/catalog/docs/specs/software-requirements/srd023-blackboard-memory.yaml
+    status: implemented
+    responsibility: |
+      Store the corpus and the derived findings for one task under a named
+      collection, carry provenance on every write, and answer metadata and
+      exact-substring filtered queries. Catalog-owned; the application configures
+      the collection name and the filters.
+  - name: corpus ingest
+    source: applications/catalog/agents/knowledge-manager/corpus-ingest/
+    library_requirement: applications/catalog/docs/specs/software-requirements/srd012-chroma-corpus-agents.yaml
+    status: implemented
+    responsibility: |
+      Load the fixture corpus into the per-task collection before the loop
+      starts. Catalog-owned; the application supplies the corpus and the
+      collection identity.
+  - name: memory-write
+    source: applications/catalog/agents/knowledge-manager/memory-write/
+    library_requirement: applications/catalog/docs/specs/software-requirements/srd023-blackboard-memory.yaml
+    status: implemented
+    responsibility: |
+      Write one provenance-tagged entry and return its record id. Catalog-owned;
+      the worker supplies the entry through the block's request contract.
+  - name: documentation
+    path: docs/
+    status: planned
+    responsibility: |
+      Own the application vision, architecture, road map, release specifications,
+      and the evidence contract for each release.
+
+design_decisions:
+  - id: 1
+    title: The swarm is agent-owning, not composition-only
+    decision: |
+      rlm-root and rlm-worker are application-local profiles, not catalog
+      members. They are promoted only if a second consumer appears.
+    benefits:
+      - The loop's shape can change per release without a catalog release.
+      - Catalog membership stays governed by independent usefulness rather than
+        by being the first implementation of something.
+      - The precedent is chatbot-mesh, whose chatbot and observer began local.
+  - id: 2
+    title: Coordinate through the store, not through messages
+    decision: |
+      Workers return nothing to the root. Everything a worker produces reaches
+      the root by being written to the collection and read back by handle.
+    benefits:
+      - A worker can terminate the moment it writes, with no rendezvous.
+      - The root's inputs are constant-size by construction rather than by prompt
+        discipline.
+      - Every intermediate result is inspectable after the run, because it is a
+        record rather than a message.
+  - id: 3
+    title: Handle discipline is a machine invariant, stated per state
+    decision: |
+      Each root state declares what it may see. Document text is not among the
+      declared inputs of any root state, and the release evidence asserts its
+      absence in the root transcript and trace.
+    benefits:
+      - The property that justifies the architecture is checkable rather than
+        claimed.
+      - A regression that starts threading content into the root fails a test
+        instead of quietly growing the context.
+  - id: 4
+    title: Workers are run-to-completion from the first release
+    decision: |
+      The worker machine terminates after one intent in release 01.0, when
+      workers are local processes, and keeps that shape when release 03.0 runs
+      them as Kubernetes Jobs with catalog lifecycle-exit self-teardown.
+    benefits:
+      - The deployment change is topology, not machine redesign.
+      - Context is bounded by process lifetime in both shapes.
+      - A stuck worker costs one intent and one Job.
+  - id: 5
+    title: The collection is task-scoped
+    decision: |
+      The collection name identifies the task. Ingest creates it and teardown
+      deletes it; nothing persists between tasks.
+    benefits:
+      - One run cannot read another run's findings.
+      - Provenance filters need only distinguish rounds and agents, not tasks.
+      - Cleanup is one delete rather than a retention policy.
+  - id: 6
+    title: The lifecycle control plane is copied locally before it is promoted
+    decision: |
+      Release 03.0 takes application-local copies of the
+      provisioning-workflow-orchestrator and creator pattern with a Job-shaped
+      create. Catalog promotion is deferred until a second application needs it.
+    benefits:
+      - The observer precedent applies: mesh-local first, catalog family later.
+      - A promotion decision is made with two consumers in evidence rather than
+        one.
+
+technology_choices:
+  - choice: Chroma as the blackboard store
+    rationale: |
+      The catalog corpus family already binds Chroma, and the blackboard needs
+      exactly what release 17.0 added to it: named collections, metadata on
+      writes, and filtered reads. Introducing a second store would fork the
+      retrieval boundary for no additional capability.
+  - choice: Local Ollama for embeddings and reasoning
+    rationale: |
+      Every release must run from a fresh clone with local dependencies. A hosted
+      model endpoint would make the article's reproduction steps depend on an
+      account and a key.
+  - choice: Kubernetes Jobs for workers, from release 03.0
+    rationale: |
+      A worker is run-to-completion by design. A Job is the workload that matches
+      that lifecycle, and catalog lifecycle-exit already gives the machine a
+      self-teardown boundary.
+
+project_structure:
+  - path: agents/
+    contents: |
+      Application-owned rlm-root and rlm-worker profiles, the composition
+      manifest, and thin wrappers over consumed catalog blocks.
+  - path: docs/
+    contents: |
+      Vision, architecture, road map, specification index, and the per-release
+      SRDs, use cases, and test suites.
+  - path: magefiles/
+    contents: |
+      The module's audit, test, stats, and integration targets.
+  - path: testdata/integration/
+    contents: |
+      The deterministic fixture corpus and the known multi-hop answer the
+      release 01.0 evidence checks.
+
+implementation_status:
+  current_focus: |
+    Release 01.0: the local blackboard loop. Governance documents exist; the
+    specifications, module scaffold, profiles, and integration evidence follow in
+    that order.
+  progress:
+    - planned: Release 01.0 local blackboard loop with root intents, locally-run
+        workers, provenance write-back, and reduction to a Final entry.
+    - planned: Release 02.0 profile package and Helm topology.
+    - planned: Release 03.0 provisioned swarm on kind with Job workers and a
+        fleet view.
+    - planned: Release 04.0 benchmark evidence over multi-hop question answering.
+
+related_documents:
+  - docs/VISION.yaml
+  - docs/road-map.yaml
+  - docs/SPECIFICATIONS.yaml
+  - applications/docs/specs/software-requirements/srd001-application-module-contract.yaml
+  - applications/docs/specs/software-requirements/srd003-application-consistency.yaml
+  - applications/catalog/docs/specs/software-requirements/srd023-blackboard-memory.yaml
+  - applications/catalog/docs/specs/software-requirements/srd012-chroma-corpus-agents.yaml

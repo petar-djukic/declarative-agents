@@ -1,0 +1,105 @@
+id: large-context-swarm-specifications
+title: Large Context Swarm Specification Index
+
+overview: |
+  This index covers the governance corpus for the large context swarm. Four
+  releases are planned; none is specified yet. The release 01.0 SRD, use case,
+  and test suite are the next documents to land, and they are what the profiles
+  and the integration evidence implement.
+
+  Shared application requirements and catalog family requirements stay external.
+  Local documents cite them and define only this application's loop, its actor
+  boundaries, and its evidence.
+
+roadmap_summary:
+  - version: "01.0"
+    name: Local blackboard loop
+    use_cases_done: 0
+    use_cases_total: 1
+    status: planned
+    evidence: No specifications or executable evidence exist; the release 01.0 SRD, use case, and test suite are the next deliverable.
+  - version: "02.0"
+    name: Profile package and Helm topology
+    use_cases_done: 0
+    use_cases_total: 1
+    status: planned
+    evidence: No specifications or executable evidence exist.
+  - version: "03.0"
+    name: Provisioned swarm on kind
+    use_cases_done: 0
+    use_cases_total: 1
+    status: planned
+    evidence: No specifications or executable evidence exist.
+  - version: "04.0"
+    name: Benchmark evidence
+    use_cases_done: 0
+    use_cases_total: 1
+    status: planned
+    evidence: No specifications or executable evidence exist.
+
+foundation_document_index:
+  - id: large-context-swarm-readme
+    title: Large Context Swarm
+    summary: Human entry point — the mechanism, the actor boundaries, planned entry points, and truthful status.
+    status: planned
+    path: README.md
+  - id: large-context-swarm
+    title: "Large Context Swarm: Recursive Language Models as a Declarative Swarm"
+    summary: Problem, mechanism, actor boundaries with their justifications, success criteria, and exclusions.
+    status: planned
+    path: docs/VISION.yaml
+  - id: architecture-large-context-swarm
+    title: Large Context Swarm Architecture
+    summary: Components, interfaces, the context boundary, decisions of record, technology choices, and source layout.
+    status: planned
+    path: docs/ARCHITECTURE.yaml
+  - id: large-context-swarm-roadmap
+    title: Large Context Swarm Road Map
+    summary: Four planned releases from the local loop to measured benchmark evidence, each with its integration gate.
+    path: docs/road-map.yaml
+    status: planned
+
+srd_index: []
+
+config_format_index: []
+
+semantic_model_index: []
+
+use_case_index: []
+
+test_suite_index: []
+
+external_references:
+  note: |
+    These requirements are owned elsewhere. This application cites them and
+    consumes their behavior; it does not restate or fork them.
+  requirements:
+    - id: srd001-application-module-contract
+      owner: applications/docs
+      summary: Baseline runnable-module obligations — canonical references, local documents, root orchestration participation, ownership-aware agent accounting.
+    - id: srd003-application-consistency
+      owner: applications/docs
+      summary: Manifest as composition authority, README shape, and the status vocabulary this corpus uses.
+    - id: srd023-blackboard-memory
+      owner: applications/catalog
+      summary: Named collections, provenance metadata on writes, metadata and exact-substring query filters, and the memory-write block this application's workers use.
+    - id: srd012-chroma-corpus-agents
+      owner: applications/catalog
+      summary: The Chroma corpus family, its REST vocabulary, and the provider-embedding threading contract the blackboard inherits.
+
+coverage_gaps: |
+  Every release is planned and nothing is specified, so the corpus currently
+  states intent and boundaries only. The concrete gaps, in the order they close:
+
+  Release 01.0 has no SRD, use case, or test suite. Until they exist there is no
+  contract for the root and worker machines, and the handle-discipline invariant
+  is prose in the vision rather than a numbered requirement with a test case.
+
+  The module is not registered at root, so it does not yet participate in root
+  audit, test, stats, or release orchestration, and it owns no manifest. Until
+  registration lands, the classification in this corpus is a claim about a
+  directory rather than a checked status.
+
+  Releases 02.0 through 04.0 name their SRDs by identifier only. Those
+  identifiers are reserved, not written, and the road-map entries are the only
+  description of their scope.

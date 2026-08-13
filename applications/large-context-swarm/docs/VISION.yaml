@@ -1,0 +1,176 @@
+id: large-context-swarm
+title: "Large Context Swarm: Recursive Language Models as a Declarative Swarm"
+
+executive_summary: |
+  The large context swarm answers a question about a corpus that never fits in a
+  context window, and it does so without ever putting the corpus in one. The
+  corpus lives in a per-task Chroma collection. A root agent turns the task into
+  search intents. Ephemeral workers each take one intent, search the collection,
+  write one provenance-tagged finding back, and terminate. The root reads the
+  findings' identities and metadata, decides whether to run another round, and
+  reduces the accumulated findings into a single Final entry.
+
+  Only handles and constant-size metadata cross the root's boundary. Document
+  text reaches a worker's context and stops there. That property is the design,
+  not an optimization of it: the root's context stays the same size whether the
+  corpus is ten documents or ten thousand.
+
+  This application composes the catalog blackboard-memory extensions (catalog
+  srd023) and the corpus family (catalog srd012). The blocks that read and write
+  the collection are catalog-owned; the root and worker programs, their
+  relationships, and the loop are application-owned.
+
+problem: |
+  A model asked to reason over a corpus larger than its context window has two
+  conventional options, and both degrade. Retrieval-augmented generation selects
+  a fixed number of chunks before the model has decided what it needs, so a
+  question whose answer spans several documents in a way the query embedding does
+  not capture returns partial evidence. Feeding a long context directly hits the
+  window, and, well before the window, hits the accuracy loss that comes with
+  distance and volume.
+
+  Recursive Language Models (arXiv 2512.24601) reframe the prompt: instead of
+  text the model must read, the prompt becomes an environment the model queries.
+  A root model issues queries against the corpus rather than consuming it, so
+  the corpus size stops bounding what can be reasoned about.
+
+  Reproducing that as a swarm needs boundaries the reference architecture already
+  names. The searching work must scale independently of the reasoning work, must
+  fail without taking the reasoning down, and must have a lifecycle short enough
+  that a worker's context is discarded with the worker. A single actor holding
+  both roles would put retrieved document text in the same context window that
+  has to survive every round, which is the property the design exists to avoid.
+
+what_this_does: |
+  The application ingests a corpus into a per-task collection, runs a bounded
+  root loop over ephemeral workers, and produces one Final entry that answers the
+  task with provenance back to the records the workers wrote.
+
+  The root plans and coordinates. It accepts one task intent, emits sub-intents,
+  and — after each round — queries the collection for what that round produced,
+  filtering on provenance metadata rather than reading content. Its states see
+  record identities, tag values, and counts. No state receives stored document
+  text, and the machine declares that per state rather than leaving it to
+  convention.
+
+  Workers hold knowledge and actuation. Each is seeded with one intent, searches
+  the collection three ways (vector similarity, exact substring through
+  where_document $contains, and provenance filters through where), writes exactly
+  one tagged finding through the catalog memory-write block, and terminates. A
+  worker's context holds retrieved text; the worker's lifetime is one intent, so
+  that text is discarded with the process.
+
+  The blackboard is the knowledge store both sides share. Its name identifies the
+  task, its metadata identifies the writer and the round, and its lifecycle is
+  scoped to the task: created at ingest, deleted at teardown.
+
+why_we_build_this: |
+  The mechanism is worth having as a runnable declarative program rather than a
+  paper description because the properties that make it work are exactly the
+  properties a declarative machine can state and a test can check. Handle
+  discipline is an invariant over states. Round bounds are a budget. Worker
+  scaling is a lifecycle boundary. Provenance is metadata on a write. Each is
+  checkable evidence rather than a claim about a prompt.
+
+  It is also the case that reproducing a published mechanism is the strongest
+  available test of whether this repository's declarative vocabulary is
+  sufficient. If the swarm needs runtime code that is not a declaration, that is
+  a finding about the vocabulary.
+
+actor_boundaries:
+  - actor: rlm-root
+    roles: [planning, coordination]
+    boundary: |
+      Authority and lifecycle. The root alone decides what to search for, when a
+      round has produced enough, and what the Final entry says. It survives every
+      round, so it is the one context that must not accumulate document text.
+    justification: |
+      Separating the root from the workers is what keeps the reasoning context
+      constant-size. Co-locating them would put every retrieved chunk in the
+      context that spans all rounds, which removes the property the application
+      exists to demonstrate.
+  - actor: rlm-worker
+    roles: [knowledge, actuation]
+    boundary: |
+      Failure and scaling. A worker holds retrieved content, writes one finding,
+      and exits. Workers run independently of each other, so their number tracks
+      the intent count rather than any fixed topology, and a failed worker costs
+      one intent rather than the run.
+    justification: |
+      Independent scaling and failure isolation are the stated grounds for
+      separation in the shared contract. A worker's short lifecycle is also what
+      bounds context: the process that read the documents is gone before the next
+      round starts.
+  - actor: blackboard collection
+    roles: [knowledge]
+    boundary: |
+      State. The collection is the only thing shared between the root and the
+      workers, and it is addressed by handle. It is not an actor with a machine;
+      it is the store the actors coordinate through.
+    justification: |
+      Coordinating through a store rather than through messages is what lets a
+      worker terminate without a rendezvous, and what makes every intermediate
+      result inspectable after the run.
+  - actor: human boundary
+    roles: [intent, accountability]
+    boundary: |
+      A person supplies the task intent and reads the Final entry. Nothing in the
+      loop escalates to a human decision, because nothing in the loop takes an
+      irreversible action outside the task's own collection.
+    justification: |
+      The shared contract requires each application to say where autonomous
+      authority ends. Here it ends at the collection: the swarm reads a corpus
+      and writes derived entries into storage scoped to its own task.
+
+success_criteria:
+  root_context_stays_symbolic: |
+    The root's transcript and trace contain record identities, tag values, and
+    counts, and contain no fixture document text. This is asserted against a real
+    run, not stated as an intention.
+  corpus_never_enters_one_window: |
+    No single agent context holds the whole corpus. Workers see the chunks their
+    own intent retrieved; the root sees none.
+  findings_carry_provenance: |
+    Every derived entry names its writing agent and its round, so the reduce step
+    and any later reader can attribute a claim to the worker that made it.
+  rounds_are_bounded: |
+    The root's iteration is a declared bound, and reaching it terminates with a
+    Final entry rather than looping.
+  collection_lifecycle_is_scoped: |
+    The per-task collection is created at ingest and deleted at teardown, so one
+    run leaves no state that a later run can read.
+  catalog_behavior_is_referenced: |
+    Blackboard reads and writes use the catalog blocks and operations. The
+    application configures and sequences them; it does not fork them.
+  every_release_runs_from_a_fresh_clone: |
+    Each release's evidence command works in a clean checkout with the documented
+    local dependencies, because the releases are also the subject of a written
+    article.
+
+not:
+  - We do not restate the catalog blackboard-memory or Chroma corpus
+    requirements; we cite catalog srd023 and srd012 and consume their blocks.
+  - We do not claim the paper's benchmark results. Release 04.0 measures this
+    implementation; until then the application claims a mechanism, not a score.
+  - We do not put document content in the root's context as a fallback when a
+    query returns nothing. An empty result is a result the root reasons about.
+  - We do not give workers authority over the collection lifecycle, the round
+    bound, or the Final entry.
+  - We do not start or stop Chroma or Ollama from an agent; they are external
+    preconditions surfaced through readiness words.
+  - We do not treat the blackboard as durable memory across tasks. The collection
+    is task-scoped and deleted at teardown.
+
+canonical_documents:
+  - docs/ARCHITECTURE.yaml
+  - docs/road-map.yaml
+  - docs/SPECIFICATIONS.yaml
+  - README.md
+
+library_references:
+  note: |
+    These are canonical catalog requirements. The application cites them and
+    consumes their blocks by reference.
+  requirements:
+    - applications/catalog srd023-blackboard-memory
+    - applications/catalog srd012-chroma-corpus-agents

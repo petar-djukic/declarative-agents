@@ -1,0 +1,115 @@
+id: large-context-swarm-roadmap
+title: Large Context Swarm Road Map
+
+overview: |
+  Four releases move one loop from local processes to a provisioned swarm with
+  measured results. The loop itself — root intents, worker searches,
+  provenance-tagged write-back, reduction to a Final entry — is established in
+  release 01.0 and is not redesigned afterwards. Later releases change how the
+  workers are packaged, provisioned, and observed, and then measure what the loop
+  produces.
+
+  Every release runs from a fresh clone with documented local dependencies,
+  because the releases are also the subject of a written article. A release that
+  needs an account, a key, or a developer-local path is not done.
+
+releases:
+  - version: "01.0"
+    name: Local blackboard loop
+    description: |
+      A fixture corpus is ingested into a per-task collection. The root turns one
+      task intent into sub-intents, workers run locally — one per intent — search
+      the collection three ways and write one provenance-tagged finding each, and
+      the root queries each round's derived entries by provenance, decides
+      whether the round bound allows another round, and reduces the findings into
+      a Final entry. Teardown deletes the collection.
+
+      The release proves the property the architecture exists for: the root's
+      transcript and trace carry record identities and tags, and no fixture
+      document text.
+    status: planned
+    library_srds:
+      - applications/catalog srd023-blackboard-memory
+      - applications/catalog srd012-chroma-corpus-agents
+    application_srds:
+      - srd001-blackboard-loop
+    use_cases:
+      - id: rel01.0-uc001-blackboard-loop
+        summary: A task intent becomes searched findings and one Final entry without the corpus entering the root's context.
+        status: planned
+    test_suites:
+      - id: test-rel01.0-blackboard-loop
+        summary: Intent fan-out, worker filter usage, provenance tags, root handle discipline, Final entry content, and collection teardown.
+        status: planned
+    integration_gate: |
+      Local Chroma and Ollama, with a documented skip when either is absent.
+
+  - version: "02.0"
+    name: Profile package and Helm topology
+    description: |
+      The application packages its profile closure per role and renders a chart
+      for the root and the worker, following the coding-agent release 03.0 and
+      04.0 pattern. No provisioning control plane yet: the chart describes the
+      topology the next release provisions.
+    status: planned
+    application_srds:
+      - srd002-package-and-topology
+    use_cases:
+      - id: rel02.0-uc001-package-swarm-topology
+        summary: A release builder emits one mountable profile closure per role and renders the swarm topology.
+        status: planned
+    test_suites:
+      - id: test-rel02.0-package-and-topology
+        summary: Exact closures, deterministic renders, and values validation.
+        status: planned
+    integration_gate: |
+      Package and render tests; no cluster required.
+
+  - version: "03.0"
+    name: Provisioned swarm on kind
+    description: |
+      The root stops starting local processes and starts asking a lifecycle
+      control plane for workers. Application-local copies of the
+      provisioning-workflow-orchestrator and creator pattern take a Job-shaped
+      create; workers run as Kubernetes Jobs and tear themselves down through the
+      catalog lifecycle-exit boundary. An observer gives the fleet a view of the
+      running swarm.
+
+      Catalog promotion of the control-plane pattern is deferred, mirroring the
+      observer precedent: mesh-local first, catalog family once a second consumer
+      exists.
+    status: planned
+    application_srds:
+      - srd003-provisioned-swarm
+    use_cases:
+      - id: rel03.0-uc001-provisioned-swarm
+        summary: The root provisions Job workers that run to completion and tear themselves down, observed as a fleet.
+        status: planned
+    test_suites:
+      - id: test-rel03.0-provisioned-swarm
+        summary: Job-shaped create, run-to-completion teardown, fleet view, and classified failures with cleanup.
+        status: planned
+    integration_gate: |
+      The ENG01 kind rig, with its documented skip contract.
+
+  - version: "04.0"
+    name: Benchmark evidence
+    description: |
+      The loop is measured rather than described: multi-hop question answering
+      scored against known answers, with rounds and cost recorded per run. An
+      optional mode reports intent and range coverage so a low score can be
+      attributed to search coverage or to reduction rather than to the mechanism
+      as a whole.
+    status: planned
+    application_srds:
+      - srd004-benchmark-evidence
+    use_cases:
+      - id: rel04.0-uc001-benchmark-evidence
+        summary: A scored benchmark run reports answer quality, rounds, and cost for the swarm.
+        status: planned
+    test_suites:
+      - id: test-rel04.0-benchmark-evidence
+        summary: Deterministic scoring harness, recorded metrics, and coverage attribution.
+        status: planned
+    integration_gate: |
+      The scoring harness over a local model, with recorded run metrics.
