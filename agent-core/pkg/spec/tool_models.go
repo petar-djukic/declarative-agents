@@ -3,6 +3,8 @@
 package spec
 
 import (
+	"fmt"
+
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"gopkg.in/yaml.v3"
 )
@@ -65,12 +67,15 @@ type ToolDeclUndo struct {
 
 // ToolDeclSideEffects handles both structured and legacy side_effects.
 type ToolDeclSideEffects struct {
-	Items []ToolDeclSideEffect
+	LegacyText string
+	Items      []ToolDeclSideEffect
 }
 
 // ToolDeclSideEffect captures one structured side-effect entry.
 type ToolDeclSideEffect struct {
-	Kind string `yaml:"kind"`
+	Kind   string `yaml:"kind"`
+	Target string `yaml:"target,omitempty"`
+	State  string `yaml:"state,omitempty"`
 }
 
 // ToolDeclError captures a declared failure mode.
@@ -91,17 +96,30 @@ type ToolDeclRelationshipRef struct {
 }
 
 func (s *ToolDeclSideEffects) UnmarshalYAML(value *yaml.Node) error {
-	var items []ToolDeclSideEffect
-	if err := value.Decode(&items); err == nil {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		return value.Decode(&s.LegacyText)
+	case yaml.SequenceNode:
+		var items []ToolDeclSideEffect
+		if err := value.Decode(&items); err != nil {
+			return err
+		}
 		s.Items = items
 		return nil
+	case 0:
+		return nil
+	default:
+		return fmt.Errorf("side_effects must be a string or list")
 	}
-	return nil
 }
 
 // ToolDeclFile is the top-level YAML structure for a tool declaration file.
+// ToolDeclFile mirrors the runtime declaration-file shape. Includes must be
+// resolved the same way internal/tools/catalog resolves them, or the corpus and
+// the runtime disagree about which words are declared (GH-1525).
 type ToolDeclFile struct {
-	Tools []ToolDeclaration `yaml:"tools"`
+	Includes []string          `yaml:"includes,omitempty"`
+	Tools    []ToolDeclaration `yaml:"tools"`
 }
 
 // KnownSideEffectKinds is the canonical vocabulary for side_effects kind values.

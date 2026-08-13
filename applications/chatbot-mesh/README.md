@@ -112,8 +112,14 @@ need the persistent OTLP ingress: the canonical collector agent run as a
 background host process, accepting both trace and metric exports on one gRPC
 listener and retaining them in its spool (srd008-telemetry R9, srd042 R8/R9).
 There is no docker-compose stack and no Prometheus backend; kind remains the
-only Docker consumer. The spool outlives any one integration run — `down`
-keeps it and only `reset` deletes it.
+only Docker consumer. Standalone targets leave the host collector running for
+reuse. The aggregate stops its collector after every concurrent lane finishes,
+so removing its source worktree cannot orphan a process; the spool still
+outlives the run. `up`, `down`, and `reset` serialize their complete collector
+reconciliation through a bounded advisory lock in the repository's Git common
+directory, so linked worktrees cannot race the inspect/stop/start transaction
+and a crashed holder releases the lock automatically. `down` also keeps that
+evidence, and only `reset` deletes it.
 
 ```bash
 mage observability:up      # build the agent and start the ingress, or reuse a healthy one
@@ -122,8 +128,9 @@ mage observability:down    # stop the ingress, keep the trace and metric spool
 mage observability:reset   # stop the ingress and delete the spool
 ```
 
-Defaults expose OTLP gRPC on `4317`, collector control on `18191`, and the
-collector query surface on `18193` (`/query/traces` and `/query/metrics`);
+Defaults expose OTLP gRPC on `4317`, collector control on `18191`, collector
+monitor on `18192`, and the collector query surface on `18193`
+(`/query/traces` and `/query/metrics`);
 override with `otel_grpc_port`, `collector_control_port`,
 `collector_monitor_port`, `collector_query_port`, and `collector_bind_host`
 in `demo.yaml`. The ingress shares ports 4317 and 18193 with the
@@ -143,8 +150,11 @@ call made directly by an integration tracer. It does not bound the canonical
 Chroma corpus-ingest agent, whose profile-owned calls may each take 300 seconds.
 `chroma_ingest_timeout` instead bounds that complete multi-call ingest run
 (default `20m`), including startup, embedding, Chroma writes, and terminal
-verification. `integration_otlp_endpoint` points integration launches at a live
-OTLP ingress (empty keeps them file-only).
+verification. `chroma_integration_chat_model` selects the bounded evidence
+model for `integration:chroma` (default `qwen2.5:3b`) through the canonical
+profile's declared `CORPUS_CHAT_MODEL` child contract; it does not change that
+profile's `ornith:9b` operator default. `integration_otlp_endpoint` points
+integration launches at a live OTLP ingress (empty keeps them file-only).
 
 The shared ENG01 operator verbs are:
 
