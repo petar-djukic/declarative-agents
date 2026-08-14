@@ -11,6 +11,7 @@ invariants:
   - Reject names structure as the only responsible stage in this tracer.
 initial_state: AwaitingRequest
 budget:
+  command_timeout: 3m
   max_iterations: 16
   max_tokens: 100000
   max_duration: 5m0s

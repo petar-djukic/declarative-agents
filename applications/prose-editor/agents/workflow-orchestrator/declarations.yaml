@@ -17,7 +17,7 @@ tools:
       - {kind: filesystem_write, target: .tracer/captured-source.md, state: immutable}
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: irreversible, undo: preserve_captured_source}
+    reversibility: {classification: irreversible}
     undo: {strategy: irreversible, description: Preserve the immutable capture, manifest projection, and boundary receipt.}
 
   - name: write_original
@@ -35,7 +35,7 @@ tools:
       - {kind: filesystem_write, target: 00-original.md, state: immutable}
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: irreversible, undo: preserve_original}
+    reversibility: {classification: irreversible}
     undo: {strategy: noop, description: The immutable original is preserved on compensation.}
 
   - &append_manifest_revision
@@ -57,7 +57,7 @@ tools:
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: state_mutation, target: manifest artifact selection, state: superseded_and_cleared}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: compensatable, undo: append_corrective_revision}
+    reversibility: {classification: compensatable}
     undo: {strategy: compensating_action, description: Append a corrective revision; never rewrite history.}
 
   - <<: *append_manifest_revision
@@ -118,7 +118,7 @@ tools:
         saga_id: $.saga_id
       template: '{"attempt":1,"bounded_structure_intent":"Improve structure without changing claims.","parent_artifact_id":{{ json parent_artifact_id }},"parent_content":{{ json parent_content }},"parent_content_hash":{{ json parent_content_hash }},"saga_id":{{ json saga_id }},"stage":"structure"}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Composition changes no state.}
     errors: [{signal: CommandError, condition: A manifest selector cannot resolve, state_after_failure: No request is persisted.}]
 
@@ -157,7 +157,7 @@ tools:
         saga_id: $.saga_id
       template: '{"attempt":{{ attempt }},"candidate_artifact_id":{{ json candidate_artifact_id }},"candidate_content":{{ json candidate_content }},"candidate_content_hash":{{ json candidate_content_hash }},"candidate_stage":{{ json candidate_stage }},"original_artifact_id":{{ json original_artifact_id }},"original_content":{{ json original_content }},"original_content_hash":{{ json original_content_hash }},"saga_id":{{ json saga_id }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Composition changes no state.}
     errors: [{signal: CommandError, condition: A manifest selector cannot resolve, state_after_failure: No request is persisted.}]
 
@@ -195,7 +195,7 @@ tools:
     side_effects:
       - {kind: filesystem_write, target: .tracer/requests/structure-1.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: compensatable, undo: append_corrective_revision}
+    reversibility: {classification: compensatable}
     undo: {strategy: compensating_action, description: Preserve the addressed request and append correction metadata.}
 
   - <<: *persist_child_request
@@ -238,7 +238,7 @@ tools:
       request_from: $from(structure_request_file).$
     side_effects:
       - {kind: child_agent_execution, target: specialist-editor-structure, state: candidate_observed}
-    reversibility: {classification: compensatable, undo: child_agent_workspace_restore}
+    reversibility: {classification: compensatable}
     undo:
       strategy: child_agent_workspace_restore
       description: Restore child workspace artifacts or retain explicit compensation work.
@@ -263,7 +263,7 @@ tools:
       - {kind: filesystem_write, target: attempts/structure, state: immutable}
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: irreversible, undo: append_supersession}
+    reversibility: {classification: irreversible}
     undo: {strategy: compensating_action, description: Supersede by manifest revision without deleting bytes.}
 
   - name: invoke_voice_critic
@@ -279,7 +279,7 @@ tools:
       request_from: $from(critic_request_file).$
     side_effects:
       - {kind: child_agent_execution, target: voice-critic, state: verdict_observed}
-    reversibility: {classification: compensatable, undo: child_agent_workspace_restore}
+    reversibility: {classification: compensatable}
     undo:
       strategy: child_agent_workspace_restore
       description: Restore child workspace artifacts or retain explicit compensation work.
@@ -300,7 +300,7 @@ tools:
       request_from: $from(structure_retry_request_file).$
     side_effects:
       - {kind: child_agent_execution, target: specialist-editor-structure, state: candidate_observed}
-    reversibility: {classification: compensatable, undo: child_agent_workspace_restore}
+    reversibility: {classification: compensatable}
     undo:
       strategy: child_agent_workspace_restore
       description: Restore child workspace artifacts or retain explicit compensation work.
@@ -321,7 +321,7 @@ tools:
       request_from: $from(critic_retry_request_file).$
     side_effects:
       - {kind: child_agent_execution, target: voice-critic, state: verdict_observed}
-    reversibility: {classification: compensatable, undo: child_agent_workspace_restore}
+    reversibility: {classification: compensatable}
     undo:
       strategy: child_agent_workspace_restore
       description: Restore child workspace artifacts or retain explicit compensation work.
@@ -343,7 +343,7 @@ tools:
         response: $.
       template: '{"response": {{ json response }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Capturing output changes no state.}
 
   - name: parse_critic_response
@@ -421,7 +421,7 @@ tools:
       parsed: CriticResponseParsed
       unparsed: CriticResponseInvalid
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Parsing changes no state.}
 
   - name: critic_verdict_is_pass
@@ -440,7 +440,7 @@ tools:
       satisfied: CriticAccepted
       unsatisfied: CriticRejected
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Comparing a verdict changes no state.}
 
   - name: write_critique_attempt
@@ -461,7 +461,7 @@ tools:
       - {kind: state_mutation, target: manifest.last_critic, state: recorded}
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: irreversible, undo: append_supersession}
+    reversibility: {classification: irreversible}
     undo: {strategy: compensating_action, description: Supersede by manifest revision without deleting bytes.}
 
   - name: materialize_final_chain
@@ -481,5 +481,5 @@ tools:
       - {kind: filesystem_write, target: final.md, state: immutable}
       - {kind: filesystem_write, target: manifest.json, state: projected}
       - {kind: filesystem_write, target: boundary-receipts.jsonl, state: append_only}
-    reversibility: {classification: irreversible, undo: preserve_and_block}
+    reversibility: {classification: irreversible}
     undo: {strategy: noop, description: Reuse matching files and block on any mismatch.}

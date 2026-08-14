@@ -3,6 +3,7 @@
 package lifecycle
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,11 +12,13 @@ import (
 
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/undo"
 )
 
 // rollbackViaReceiptsOptions configures a two-part rollback: a git-style DB
 // Revert followed by a reverse receipt walk that reverses external effects.
 type rollbackViaReceiptsOptions struct {
+	Context         context.Context
 	Reverter        core.CheckpointReverter
 	Registry        core.CommandResolver
 	Tracer          tracing.Tracer
@@ -36,10 +39,11 @@ type UndoFailure struct {
 // operator or a later machine action. It is a successful classification of a
 // compensatable effect, not a receipt-walk failure.
 type PendingCompensation struct {
-	Step        int      `json:"step"`
-	CommandName string   `json:"command"`
-	Description string   `json:"description"`
-	Requires    []string `json:"requires"`
+	Step        int                    `json:"step"`
+	CommandName string                 `json:"command"`
+	Description string                 `json:"description"`
+	Requires    []string               `json:"requires"`
+	Data        map[string]interface{} `json:"data,omitempty"`
 }
 
 // PartialRollbackError reports that the DB Revert succeeded but one or more
@@ -95,6 +99,9 @@ type rollbackReport struct {
 // than a clean rollback (srd026 R3.7, R6.4). Declared manual compensation is a
 // separate successful outcome, not an Undo failure.
 func rollbackViaReceipts(opts rollbackViaReceiptsOptions) (rollbackReport, error) {
+	if opts.Context == nil {
+		opts.Context = context.Background()
+	}
 	targetStep, err := resolveTargetStep(opts.Execution, opts.TargetIteration)
 	if err != nil {
 		return rollbackReport{}, err
@@ -122,7 +129,7 @@ func walkRollbackEntries(opts rollbackViaReceiptsOptions, targetStep int) (rollb
 	var failures []UndoFailure
 	for step := len(opts.Execution) - 1; step > targetStep; step-- {
 		entry := opts.Execution[step]
-		outcome := undoEntry(opts.Registry, opts.Tracer, step, entry)
+		outcome := undoEntry(opts.Context, opts.Registry, opts.Tracer, step, entry)
 		b.WriteString(outcome.line)
 		applyEntryOutcome(&report, &failures, entry, outcome)
 	}
@@ -196,33 +203,31 @@ func resolveTargetStep(execution core.Execution, targetIteration int) (int, erro
 
 // undoEntry reverses one persisted step's external effect. It rebuilds a fresh,
 // undo-only command through core.Reverser and drives it from the entry's opaque
-// receipt. A registered declaration identifies irreversible tools; unavailable
-// builders and receipts retain compatibility skips pending GH-1584.
+// receipt. Only a registered irreversible declaration may skip the walk;
+// missing rollback plumbing is a partial-rollback failure.
 // CompensationRequired becomes operator work, while CommandError is a failure.
-func undoEntry(registry core.CommandResolver, tracer tracing.Tracer, step int, entry core.Entry) entryOutcome {
-	if registry == nil {
-		return skipOutcome(tracer, step, entry, "no registry")
+func undoEntry(
+	ctx context.Context,
+	registry core.CommandResolver,
+	tracer tracing.Tracer,
+	step int,
+	entry core.Entry,
+) entryOutcome {
+	command, policy, outcome := prepareUndoEntry(registry, tracer, step, entry)
+	if outcome != nil {
+		return *outcome
 	}
-	policy, declared := rollbackPolicy(registry, entry.CommandName)
-	if declared && policy.Classification == "irreversible" {
-		return skipOutcome(tracer, step, entry, "irreversible by declaration")
-	}
-	builder, ok := registry.Resolve(entry.CommandName)
-	if !ok {
-		return skipOutcome(tracer, step, entry, "no builder registered")
-	}
-	reverser, ok := builder.(core.Reverser)
-	if !ok {
-		return skipOutcome(tracer, step, entry, "irreversible")
-	}
-	if entry.Receipt == "" {
-		return skipOutcome(tracer, step, entry, "no receipt")
-	}
-	res := reverser.BuildReverser().Undo(core.Result{
+	prior := core.Result{
 		Receipt:     entry.Receipt,
 		Output:      entry.Result.Output,
 		CommandName: entry.CommandName,
-	})
+	}
+	var res core.Result
+	if contextual, ok := command.(core.ContextUndoCommand); ok {
+		res = contextual.UndoContext(ctx, prior)
+	} else {
+		res = command.Undo(prior)
+	}
 	if res.Signal == core.CompensationRequired {
 		return compensationOutcome(tracer, step, entry, policy, res)
 	}
@@ -235,6 +240,69 @@ func undoEntry(registry core.CommandResolver, tracer tracing.Tracer, step int, e
 	traceRollbackEntry(tracer, "rollback.entry_reversed", step, entry.CommandName,
 		attribute.String("detail", res.Output))
 	return entryOutcome{line: fmt.Sprintf("  step=%d %s: %s\n", step, entry.CommandName, res.Output)}
+}
+
+func prepareUndoEntry(
+	registry core.CommandResolver,
+	tracer tracing.Tracer,
+	step int,
+	entry core.Entry,
+) (core.Command, core.RollbackPolicy, *entryOutcome) {
+	if registry == nil {
+		outcome := missingUndoOutcome(tracer, step, entry, "no registry")
+		return nil, core.RollbackPolicy{}, &outcome
+	}
+	policy, declared := rollbackPolicy(registry, entry.CommandName)
+	if declared && policy.Classification == "irreversible" {
+		outcome := skipOutcome(tracer, step, entry, "irreversible by declaration")
+		return nil, policy, &outcome
+	}
+	if declared && policy.Strategy == "noop" {
+		outcome := noopOutcome(tracer, step, entry)
+		return nil, policy, &outcome
+	}
+	builder, ok := registry.Resolve(entry.CommandName)
+	if !ok {
+		outcome := missingUndoOutcome(tracer, step, entry, "no builder registered")
+		return nil, policy, &outcome
+	}
+	reverser, ok := builder.(core.Reverser)
+	if !ok {
+		outcome := missingUndoOutcome(tracer, step, entry, "builder does not implement Reverser")
+		return nil, policy, &outcome
+	}
+	if entry.Receipt == "" {
+		outcome := missingUndoOutcome(tracer, step, entry, "no receipt")
+		return nil, policy, &outcome
+	}
+	command := reverser.BuildReverser()
+	if command == nil {
+		outcome := missingUndoOutcome(tracer, step, entry, "BuildReverser returned nil")
+		return nil, policy, &outcome
+	}
+	return command, policy, nil
+}
+
+func noopOutcome(tracer tracing.Tracer, step int, entry core.Entry) entryOutcome {
+	const detail = "undo: no-op"
+	traceRollbackEntry(tracer, "rollback.entry_reversed", step, entry.CommandName,
+		attribute.String("detail", detail))
+	return entryOutcome{
+		line: fmt.Sprintf("  step=%d %s: %s\n", step, entry.CommandName, detail),
+	}
+}
+
+func missingUndoOutcome(
+	tracer tracing.Tracer,
+	step int,
+	entry core.Entry,
+	reason string,
+) entryOutcome {
+	err := fmt.Errorf("rollback cannot reverse %s: %s", entry.CommandName, reason)
+	return undoFailureOutcome(tracer, step, entry, core.Result{
+		Signal: core.CommandError, CommandName: entry.CommandName,
+		Output: err.Error(), Err: err,
+	})
 }
 
 func rollbackPolicy(registry core.CommandResolver, commandName string) (core.RollbackPolicy, bool) {
@@ -257,12 +325,21 @@ func compensationOutcome(
 	res core.Result,
 ) entryOutcome {
 	description := policy.Description
+	requires := append([]string{}, policy.Requires...)
+	var data map[string]interface{}
+	if compensation, ok, err := undo.DecodeBoundaryReceipt(res.Output); err == nil && ok {
+		if compensation.Reason != "" {
+			description = compensation.Reason
+		}
+		requires = append([]string{}, compensation.Requires...)
+		data = compensation.Data
+	}
 	if description == "" {
 		description = res.Output
 	}
 	pending := &PendingCompensation{
 		Step: step, CommandName: entry.CommandName,
-		Description: description, Requires: append([]string{}, policy.Requires...),
+		Description: description, Requires: requires, Data: data,
 	}
 	traceRollbackEntry(tracer, "rollback.entry_compensation_required", step, entry.CommandName,
 		attribute.String("detail", description))

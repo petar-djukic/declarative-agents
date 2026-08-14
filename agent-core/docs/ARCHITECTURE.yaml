@@ -21,7 +21,7 @@ overview:
     packages own tracing, telemetry, traceparent, GenAI attributes, and the
     embedded monitor store. Model packages own the LLM boundary, conversations,
     profiles, parsing, and prompt assembly. Focused internal/tools packages own
-    catalog, registry, exec, filesystem, LLM, REST, service-child, OTLP,
+    catalog, registry, exec, filesystem, LLM, REST, Dolt, service-child, OTLP,
     lifecycle, control, validation, undo, and checkpoint behavior. Monitor readers expose
     cached runtime metrics through OpenTelemetry and REST/OpenAPI read models
     for live agent state. Evaluation and support packages provide session
@@ -250,6 +250,26 @@ overview:
             - internal/tools/undo
             - Go standard library net/http
             - github.com/getkin/kin-openapi/openapi3
+          must_not_depend_on:
+            - cmd/agent
+            - internal/evaluation
+            - internal/planning
+      - path: internal/tools/dolt/
+        responsibility: |
+          Dolt owns the general-purpose configured provision, query, and write
+          boundary words, trusted operation validation, bound parameters,
+          normalized server-and-database identity, bounded results, commit
+          receipts, and compensation metadata. MachineSpec owns sequencing
+          among the three words.
+        dependencies:
+          may_depend_on:
+            - internal/runtime/core
+            - internal/observability/tracing
+            - internal/tools/catalog
+            - internal/tools/registry for factory types
+            - internal/tools/undo
+            - github.com/go-sql-driver/mysql for DSN parsing and MySQL-wire configuration
+            - Go standard library database/sql
           must_not_depend_on:
             - cmd/agent
             - internal/evaluation
@@ -752,6 +772,61 @@ overview:
         - docs/specs/use-cases/rel03.0-uc004-openapi-import.yaml
         - docs/specs/use-cases/rel03.0-uc007-machine-request-documentation-ux.yaml
         - docs/specs/test-suites/test-rel03.0-rest-tools.yaml
+
+  request_signal_source_architecture:
+    status: implemented
+    summary: |
+      A profile whose trusted REST collection contains a signal_source endpoint
+      starts as a request-driven host. cmd/agent launches the configured REST
+      servers directly and waits for lifecycle cancellation instead of entering
+      the ordinary Seed bootstrap. Profiles without that binding continue
+      through the unchanged runOrResume path.
+
+      The REST adapter validates and maps one request to core.SignalEnvelope.
+      A shared core.LoopSignalSource owns per-run admission and passes accepted
+      signals into the host MachineSpec, Registry, LoopParams policy, budget,
+      timeout, monitor, and tracer. It does not create a second transition
+      engine. Model clients remain tool-owned: registration constructs one only
+      when the selected declarations include invoke_llm.
+
+      Checkpoint identity follows SignalEnvelope.RunID. Process-local serving
+      keeps one InMemoryCheckpoint per run. A configured --dolt-dsn opens and
+      closes a DoltCheckpoint for the envelope run ID on each request, allowing
+      continuation after process restart. Resume restores Position, Execution,
+      conversation, and domain snapshots before the new signal and payload
+      enter Loop. NoopCheckpoint still permits fresh execution but refuses an
+      explicit suspended-run claim.
+    request_flow: |
+      ```mermaid
+      sequenceDiagram
+        participant H as HTTP caller
+        participant R as REST signal_source
+        participant A as LoopSignalSource
+        participant C as Checkpoint per RunID
+        participant L as core.Loop
+
+        H->>R: validated configured request
+        R->>A: SignalEnvelope
+        A->>C: load current run when present
+        A->>A: declare, state, and ownership admission
+        A->>L: mapped signal and payload
+        L->>C: save Position and Execution
+        L-->>A: succeeded, failed, or suspended
+        A-->>R: admission and run outcome
+        R-->>H: configured HTTP response
+      ```
+    ownership_rules:
+      - REST configuration owns route, schema, closed signal mapping, run-id mapping, timeout, redaction, and response policy.
+      - cmd/agent owns profile detection, listener lifecycle, per-run checkpoint construction, and domain snapshot restoration.
+      - core.LoopSignalSource owns admission, per-run dispatch exclusion, remembered process-local state, and ordinary Loop entry.
+      - MachineSpec and the selected Registry own all transitions and actions; signal_source adds no hidden workflow.
+    proof:
+      - cmd/agent TestRequestSignalSource_ModelFreeProfile
+      - cmd/agent TestRequestSignalSource_OrdinaryLoopPath
+      - cmd/agent TestRequestSignalSource_SuspendResume
+      - cmd/agent TestRequestSignalSource_ModelRunOrResumeRegression
+      - internal/runtime/core TestSignalAdmission_Outcomes and TestSignalSource_ReleasesOwnership
+      - internal/tools/rest TestRequestSignalSource_TrustedMapping and signal-source handler tests
 
   embedded_monitor_runtime_architecture:
     status: current
@@ -1444,6 +1519,8 @@ project_structure:
       role: Model-boundary, response parsing, conversation state, and done tool package
     - path: internal/tools/rest/
       role: REST client/server boundary tool package with OpenAPI loading, operation definitions, async inbox integration, and net/http runtime behavior
+    - path: internal/tools/dolt/
+      role: Configured Dolt provision, query, and write boundary words with trusted connection references and commit receipts
     - path: internal/tools/service/
       role: Scenario-rig service-child lifecycle, deterministic discovery, validator execution, and session words
     - path: internal/tools/otlp/
@@ -1500,7 +1577,8 @@ package_specification_coverage: |
   mapping covers internal/runtime/core, internal/observability, internal/model,
   the internal/tools package family, internal/support/cli, and pkg/spec behavior.
   Within the tool family, srd039 covers the REST mock binding, srd040 covers
-  internal/tools/service, and srd042 covers internal/tools/otlp.
+  internal/tools/service, srd042 covers internal/tools/otlp, and srd047 covers
+  internal/tools/dolt.
 
   Configured-agent packages are covered at the release layer. cmd/agent is
   governed by cfg-runtime-contract, release 01.0 use cases, lifecycle use cases,

@@ -24,7 +24,7 @@ tools:
       parsed: StructureRequestValid
       unparsed: StructureRequestRejected
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Request validation changes no state.}
 
   - name: formulate_structure_query
@@ -41,7 +41,7 @@ tools:
         intent: $from(validated_structure_request).bounded_structure_intent
       template: '{"query":"Document structure guidance for: {{ intent }}","n_results":8}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Query composition changes no state.}
 
   - name: embed_structure_query
@@ -55,7 +55,7 @@ tools:
     config: {rest_ref: embedding, operation: embed_structure_query}
     side_effects:
       - {kind: external_api, target: configured_embedding_provider, state: read_only}
-    reversibility: {classification: irreversible, undo: record_observation}
+    reversibility: {classification: irreversible}
     undo: {strategy: noop, description: Remote inference cannot be undone.}
 
   - name: query_structure_rag
@@ -69,7 +69,7 @@ tools:
     config: {rest_ref: structure_rag, operation: query}
     side_effects:
       - {kind: external_api, target: structure_rag.query, state: read_only}
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Retrieval is read-only.}
 
   - name: compose_structure_edit_context
@@ -91,7 +91,7 @@ tools:
         {"content":{{ json parent_content }},"artifact_id":{{ json parent_artifact_id }},"sha256":{{ json parent_content_hash }}}
         Read-only structure evidence was accepted from the preceding structure-rag transition.
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Context composition changes no state.}
 
   - name: generate_structure_edit
@@ -125,7 +125,7 @@ tools:
     side_effects:
       - {kind: external_api, target: configured_model, state: inference_observed}
       - {kind: state_mutation, target: conversation_history, state: appended}
-    reversibility: {classification: reversible, undo: conversation_truncate}
+    reversibility: {classification: reversible}
     undo: {strategy: conversation_truncate, description: Restore pre-call conversation state.}
 
   - name: capture_structure_candidate
@@ -142,7 +142,7 @@ tools:
         response: $.
       template: '{"response": {{ json response }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Capturing output changes no state.}
 
   - name: parse_structure_candidate
@@ -171,7 +171,7 @@ tools:
       parsed: StructureCandidateParsed
       unparsed: StructureCandidateInvalid
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Parsing changes no state.}
 
   - name: structure_candidate_is_valid
@@ -189,7 +189,7 @@ tools:
       satisfied: StructureCandidateValid
       unsatisfied: StructureCandidateRejected
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Comparing an outcome changes no state.}
 
   - name: compose_structure_response
@@ -210,5 +210,5 @@ tools:
         retrieval_provenance: $from(structure_candidate).retrieval_provenance
       template: '{"outcome":{{ json outcome }},"content":{{ json content }},"parent_artifact_id":{{ json parent_artifact_id }},"parent_content_hash":{{ json parent_content_hash }},"retrieval_provenance":{{ json retrieval_provenance }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Response composition changes no state.}

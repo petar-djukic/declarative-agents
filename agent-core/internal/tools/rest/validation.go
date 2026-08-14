@@ -55,7 +55,7 @@ func ValidateDefinition(def Definition) error {
 	if err := validateRetryPolicies(def.RetryPolicies); err != nil {
 		return err
 	}
-	if err := validateClients(def.Clients, def.RetryPolicies); err != nil {
+	if err := validateClients(def.Clients, def.RetryPolicies, def.ResponseMappings); err != nil {
 		return err
 	}
 	if err := validateServers(def.Servers, def.Limits); err != nil {
@@ -92,8 +92,8 @@ func validateServerAuthRefs(servers map[string]Server, auth map[string]AuthProfi
 // (client_command.retryDelay), so both are validated here.
 func validateRetryPolicies(policies map[string]RetryPolicy) error {
 	for name, retry := range policies {
-		if retry.Attempts < 0 {
-			return fmt.Errorf("retry policy %q attempts must be non-negative", name)
+		if retry.Attempts <= 0 {
+			return fmt.Errorf("retry policy %q attempts must be positive", name)
 		}
 		switch retry.Backoff {
 		case "", "none", "fixed", "exponential":
@@ -108,6 +108,87 @@ func validateRetryPolicies(policies map[string]RetryPolicy) error {
 		}
 	}
 	return nil
+}
+
+// RetryAggregateTimeout returns the conservative dispatch authority for one
+// retrying HTTP operation: every bounded attempt plus the delay before each
+// retry. It calls retryDelay so static inspection and runtime execution share
+// fixed, exponential, max-delay, and overflow-saturation semantics.
+func RetryAggregateTimeout(attemptTimeout time.Duration, retry RetryPolicy) (time.Duration, error) {
+	if attemptTimeout <= 0 {
+		return 0, fmt.Errorf("attempt timeout must be positive")
+	}
+	if err := validateRetryPolicies(map[string]RetryPolicy{"selected": retry}); err != nil {
+		return 0, err
+	}
+	total, err := checkedDurationProduct(attemptTimeout, retry.Attempts)
+	if err != nil {
+		return 0, fmt.Errorf("retry attempt timeout aggregate: %w", err)
+	}
+	retries := retry.Attempts - 1
+	if retries == 0 || retry.Backoff == "none" {
+		return total, nil
+	}
+	return addRetryDelayAggregate(total, retries, retry)
+}
+
+func addRetryDelayAggregate(
+	total time.Duration,
+	retries int,
+	retry RetryPolicy,
+) (time.Duration, error) {
+	if retry.Backoff == "" || retry.Backoff == "fixed" {
+		delays, err := checkedDurationProduct(retryDelay(retry, 1), retries)
+		if err != nil {
+			return 0, fmt.Errorf("retry delay aggregate: %w", err)
+		}
+		return checkedDurationSum(total, delays)
+	}
+
+	maxDelay := parseDuration(retry.MaxDelay, 0)
+	for attempt := 1; attempt <= retries; attempt++ {
+		delay := retryDelay(retry, attempt)
+		next, err := checkedDurationSum(total, delay)
+		if err != nil {
+			return 0, fmt.Errorf("retry delay aggregate: %w", err)
+		}
+		total = next
+		remaining := retries - attempt
+		if remaining == 0 || delay == 0 {
+			return total, nil
+		}
+		if maxDelay > 0 && delay == maxDelay {
+			delays, productErr := checkedDurationProduct(delay, remaining)
+			if productErr != nil {
+				return 0, fmt.Errorf("retry delay aggregate: %w", productErr)
+			}
+			return checkedDurationSum(total, delays)
+		}
+	}
+	return total, nil
+}
+
+func checkedDurationProduct(value time.Duration, count int) (time.Duration, error) {
+	if value < 0 || count < 0 {
+		return 0, fmt.Errorf("duration and count must be non-negative")
+	}
+	if value == 0 || count == 0 {
+		return 0, nil
+	}
+	if value > time.Duration(1<<63-1)/time.Duration(count) {
+		return 0, fmt.Errorf("duration overflow")
+	}
+	return value * time.Duration(count), nil
+}
+
+func checkedDurationSum(left, right time.Duration) (time.Duration, error) {
+	if left < 0 || right < 0 {
+		return 0, fmt.Errorf("durations must be non-negative")
+	}
+	if left > time.Duration(1<<63-1)-right {
+		return 0, fmt.Errorf("duration overflow")
+	}
+	return left + right, nil
 }
 
 func validateOptionalDuration(value string) error {
@@ -234,15 +315,28 @@ func addUnique(seen map[string]string, name, owner string) error {
 	return nil
 }
 
-func validateClients(clients map[string]Client, retries map[string]RetryPolicy) error {
+func validateClients(
+	clients map[string]Client,
+	retries map[string]RetryPolicy,
+	responseMappings map[string]ResponseMapping,
+) error {
 	for clientName, client := range clients {
+		if client.RetryRef != "" {
+			if _, ok := retries[client.RetryRef]; !ok {
+				return fmt.Errorf("REST client %q references undefined retry policy %q", clientName, client.RetryRef)
+			}
+		}
 		for resourceName, resource := range client.Resources {
-			if err := validateResource(clientName, resourceName, resource, retries[client.RetryRef], client.Operations); err != nil {
+			if err := validateResource(
+				clientName, resourceName, resource, retries[client.RetryRef], responseMappings,
+			); err != nil {
 				return err
 			}
 		}
 		for operationName, operation := range client.Operations {
-			if err := validateOperation(operationName, operation, false, client.Operations); err != nil {
+			if err := validateOperation(
+				operationName, operation, false, client.Operations, responseMappings,
+			); err != nil {
 				return err
 			}
 			if err := validateAsyncRetry(operationName, operation, retries[client.RetryRef]); err != nil {
@@ -253,7 +347,13 @@ func validateClients(clients map[string]Client, retries map[string]RetryPolicy) 
 	return nil
 }
 
-func validateResource(clientName, resourceName string, resource Resource, retry RetryPolicy, clientOps map[string]Operation) error {
+func validateResource(
+	clientName string,
+	resourceName string,
+	resource Resource,
+	retry RetryPolicy,
+	responseMappings map[string]ResponseMapping,
+) error {
 	if resource.IDField != "" || resource.VersionField != "" {
 		return fmt.Errorf(
 			"resource %s.%s id_field and version_field are reserved and not implemented",
@@ -267,7 +367,9 @@ func validateResource(clientName, resourceName string, resource Resource, retry 
 		if operation.Path == "" {
 			operation.Path = resource.Path
 		}
-		if err := validateOperation(resourceName+"."+verb, operation, isMutatingVerb(verb), clientOps); err != nil {
+		if err := validateOperation(
+			resourceName+"."+verb, operation, isMutatingVerb(verb), resource.Operations, responseMappings,
+		); err != nil {
 			return err
 		}
 		if err := validateAsyncRetry(resourceName+"."+verb, operation, retry); err != nil {
@@ -277,7 +379,13 @@ func validateResource(clientName, resourceName string, resource Resource, retry 
 	return nil
 }
 
-func validateOperation(name string, operation Operation, mutatingResource bool, clientOps map[string]Operation) error {
+func validateOperation(
+	name string,
+	operation Operation,
+	mutatingResource bool,
+	clientOps map[string]Operation,
+	responseMappings map[string]ResponseMapping,
+) error {
 	if err := validateDeclaredInputs(name, operation); err != nil {
 		return err
 	}
@@ -291,7 +399,7 @@ func validateOperation(name string, operation Operation, mutatingResource bool, 
 		return err
 	}
 	if isMutatingOperation(operation, mutatingResource) {
-		if err := validateMutatingOperation(name, operation); err != nil {
+		if err := validateMutatingOperation(name, operation, clientOps, responseMappings); err != nil {
 			return err
 		}
 	}
@@ -415,7 +523,12 @@ func validateStatusMappings(name string, operation Operation) error {
 	return nil
 }
 
-func validateMutatingOperation(name string, operation Operation) error {
+func validateMutatingOperation(
+	name string,
+	operation Operation,
+	operations map[string]Operation,
+	responseMappings map[string]ResponseMapping,
+) error {
 	if len(operation.SideEffects) == 0 {
 		return fmt.Errorf("operation %q mutates state without side_effects", name)
 	}
@@ -425,7 +538,174 @@ func validateMutatingOperation(name string, operation Operation) error {
 	if operation.Reversibility.Classification == "irreversible" && !operation.Reversibility.RequiresConfirmation {
 		return fmt.Errorf("operation %q is irreversible without confirmation", name)
 	}
+	if operation.Reversibility.Classification == "compensatable" {
+		return validateCompensationOperation(name, operation, operations, responseMappings)
+	}
 	return nil
+}
+
+func validateCompensationOperation(
+	name string,
+	operation Operation,
+	operations map[string]Operation,
+	responseMappings map[string]ResponseMapping,
+) error {
+	if len(operation.Compensation) == 0 {
+		return fmt.Errorf("operation %q is compensatable without an executable compensation target", name)
+	}
+	targetName, ok := operation.Compensation["operation"].(string)
+	if !ok || strings.TrimSpace(targetName) == "" {
+		return fmt.Errorf("operation %q compensation requires a non-empty operation target", name)
+	}
+	target, ok := operations[targetName]
+	if !ok {
+		return fmt.Errorf("operation %q compensation target %q is not defined in the same REST operation scope", name, targetName)
+	}
+	if target.BaseURLSource == bodySourceCommandState || target.Params.BodySource == bodySourceCommandState {
+		return fmt.Errorf("operation %q compensation target %q requires command_state and cannot execute from a fresh rollback receipt", name, targetName)
+	}
+	configured, err := compensationParameterMapping(name, operation.Compensation, target.Params)
+	if err != nil {
+		return err
+	}
+	produced := compensationProducedParams(operation, target, configured, responseMappings)
+	for required := range requiredOperationParams(target) {
+		if !produced[required] {
+			return fmt.Errorf(
+				"operation %q compensation target %q requires parameter %q that the rollback receipt cannot produce",
+				name, targetName, required,
+			)
+		}
+	}
+	return nil
+}
+
+func compensationParameterMapping(
+	name string,
+	compensation map[string]interface{},
+	target RequestBinding,
+) (map[string]interface{}, error) {
+	raw, exists := compensation["parameters"]
+	if !exists {
+		return nil, nil
+	}
+	parameters, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("operation %q compensation parameters must be a mapping", name)
+	}
+	declared := declaredParamNames(target)
+	for parameter := range parameters {
+		if !declared[parameter] {
+			return nil, fmt.Errorf(
+				"operation %q compensation parameter %q is not declared by its target",
+				name, parameter,
+			)
+		}
+	}
+	return parameters, nil
+}
+
+func compensationProducedParams(
+	source Operation,
+	target Operation,
+	configured map[string]interface{},
+	responseMappings map[string]ResponseMapping,
+) map[string]bool {
+	produced := requiredOperationParams(source)
+	for name, value := range configured {
+		if compensationMappingValueAvailable(value) {
+			produced[name] = true
+		}
+	}
+	if operationProducesResourceID(source, produced, responseMappings) {
+		for _, alias := range []string{"resource_id", "id", "number"} {
+			produced[alias] = true
+		}
+	}
+	if operationProducesRequestID(source, produced, responseMappings) {
+		produced["request_id"] = true
+	}
+	if source.Async != nil && source.Async.IdempotencyToken != "" {
+		produced["idempotency_token"] = true
+	}
+
+	switch target.Params.BodySource {
+	case bodySourceNone:
+		return map[string]bool{}
+	case bodySourcePreviousResult:
+		selected := map[string]bool{}
+		for name, selector := range target.Params.InputMapping {
+			parsed, ok := core.ParseSelector(selector)
+			if ok && parsed.Label == "" && len(parsed.Path) == 1 && produced[parsed.Path[0]] {
+				selected[name] = true
+			}
+		}
+		return selected
+	default:
+		return produced
+	}
+}
+
+func compensationMappingValueAvailable(value interface{}) bool {
+	if value == nil {
+		return false
+	}
+	text, ok := value.(string)
+	return !ok || strings.TrimSpace(text) != ""
+}
+
+func requiredOperationParams(operation Operation) map[string]bool {
+	required := map[string]bool{}
+	for name := range operation.Params.Path {
+		required[name] = true
+	}
+	for _, name := range bodyRequiredFields(operation.Params.BodySchema) {
+		required[name] = true
+	}
+	return required
+}
+
+func bodyRequiredFields(schema map[string]interface{}) []string {
+	var required []string
+	switch values := schema["required"].(type) {
+	case []interface{}:
+		for _, value := range values {
+			if name, ok := value.(string); ok && name != "" {
+				required = append(required, name)
+			}
+		}
+	case []string:
+		required = append(required, values...)
+	}
+	return required
+}
+
+func operationProducesResourceID(
+	operation Operation,
+	produced map[string]bool,
+	responseMappings map[string]ResponseMapping,
+) bool {
+	if resolvedResponseMapping(
+		ClientOperationDefinition{Operation: operation, ResponseMappings: responseMappings},
+		operation.Success,
+	).ResourceID != "" {
+		return true
+	}
+	return produced["resource_id"] || produced["id"] || produced["number"]
+}
+
+func operationProducesRequestID(
+	operation Operation,
+	produced map[string]bool,
+	responseMappings map[string]ResponseMapping,
+) bool {
+	if resolvedResponseMapping(
+		ClientOperationDefinition{Operation: operation, ResponseMappings: responseMappings},
+		operation.Success,
+	).RequestID != "" || produced["request_id"] {
+		return true
+	}
+	return operation.Async != nil && operation.Async.RequestID != ""
 }
 
 func validateAsyncOperation(name string, async AsyncClientConfig, _ map[string]Operation) error {
@@ -529,6 +809,13 @@ func validateEndpoint(name string, endpoint Endpoint) error {
 			return err
 		}
 	}
+	if endpoint.Binding == bindingSignalSource {
+		if err := validateSignalSourceEndpoint(name, endpoint); err != nil {
+			return err
+		}
+	} else if signalSourceYAMLSet(endpoint.SignalSource) {
+		return fmt.Errorf("endpoint %q has signal_source config but binding is %q", name, endpoint.Binding)
+	}
 	if endpoint.StaticAssets != nil && endpoint.Binding != bindingStaticAssets {
 		return fmt.Errorf(
 			"endpoint %q has static_assets config but binding is %q (want %q)",
@@ -629,15 +916,15 @@ func shutdownDrainPolicy(shutdown ShutdownConfig) string {
 func validateLifecycleControlEndpoint(name string, endpoint Endpoint) error {
 	control := endpoint.LifecycleControl
 	switch control.Action {
-	case "exit", "pause", "rollback_request", "resume", "inject_signal":
+	case "enqueue_signal", "inject_signal":
 	default:
 		return fmt.Errorf("endpoint %q lifecycle_control has unsupported action %q", name, control.Action)
 	}
 	if control.Action == "inject_signal" && len(control.AllowedSignals) == 0 {
 		return fmt.Errorf("endpoint %q lifecycle_control inject_signal requires allowed_signals", name)
 	}
-	if control.Action != "inject_signal" && lifecycleSignal(endpoint) == "" {
-		return fmt.Errorf("endpoint %q lifecycle_control requires signal", name)
+	if control.Action == "enqueue_signal" && lifecycleSignal(endpoint) == "" {
+		return fmt.Errorf("endpoint %q lifecycle_control enqueue_signal requires signal", name)
 	}
 	return validateResponseMapping(name, endpoint.Response)
 }
@@ -713,6 +1000,197 @@ func validateMachineRequestSensitiveFields(mapping MachineRequestMapping) error 
 		seen[name] = true
 	}
 	return nil
+}
+
+func validateSignalSourceEndpoint(name string, endpoint Endpoint) error {
+	cfg := endpoint.SignalSource
+	if err := validateSignalSourceNoConflicts(name, endpoint); err != nil {
+		return err
+	}
+	if err := validateSignalSourceIdentity(name, cfg); err != nil {
+		return err
+	}
+	if err := validateSignalSourceSelectors(name, endpoint.Request, cfg); err != nil {
+		return err
+	}
+	if err := validateSignalSourceMappings(name, endpoint.Request, cfg); err != nil {
+		return err
+	}
+	if err := validateSignalSourceSensitive(name, cfg); err != nil {
+		return err
+	}
+	timeout, err := time.ParseDuration(cfg.Timeout)
+	if err != nil || timeout <= 0 {
+		return fmt.Errorf("endpoint %q signal_source timeout must be a positive duration", name)
+	}
+	return validateSignalSourceResponses(name, cfg.Responses)
+}
+
+func validateSignalSourceNoConflicts(name string, endpoint Endpoint) error {
+	if endpoint.Signal != "" || len(endpoint.AllowedSignals) > 0 ||
+		endpoint.SignalField != "" || len(endpoint.SignalMapping) > 0 {
+		return fmt.Errorf("endpoint %q signal_source must not set emit_signal fields", name)
+	}
+	if machineRequestYAMLSet(endpoint.MachineRequest) {
+		return fmt.Errorf("endpoint %q signal_source must not set machine_request", name)
+	}
+	if lifecycleControlSet(endpoint.LifecycleControl) || queueConfigSet(endpoint.Queue) {
+		return fmt.Errorf("endpoint %q signal_source must not set lifecycle_control or queue", name)
+	}
+	if len(endpoint.Response.Schema) > 0 || len(endpoint.Response.Output) > 0 ||
+		len(endpoint.Response.Redact) > 0 || endpoint.Response.ResourceID != "" ||
+		endpoint.Response.RequestID != "" {
+		return fmt.Errorf("endpoint %q signal_source must use signal_source.responses", name)
+	}
+	return nil
+}
+
+func validateSignalSourceIdentity(name string, cfg SignalSourceBinding) error {
+	if strings.TrimSpace(cfg.Source) == "" {
+		return fmt.Errorf("endpoint %q signal_source requires source", name)
+	}
+	if cfg.Source != strings.TrimSpace(cfg.Source) {
+		return fmt.Errorf("endpoint %q signal_source source must not have surrounding whitespace", name)
+	}
+	if len(cfg.Source) > 128 {
+		return fmt.Errorf("endpoint %q signal_source source exceeds 128 bytes", name)
+	}
+	if len(cfg.SignalMapping) == 0 {
+		return fmt.Errorf("endpoint %q signal_source requires a closed signal_mapping", name)
+	}
+	if len(cfg.Payload) == 0 {
+		return fmt.Errorf("endpoint %q signal_source requires payload mapping", name)
+	}
+	return nil
+}
+
+func validateSignalSourceSelectors(
+	name string,
+	request RequestBinding,
+	cfg SignalSourceBinding,
+) error {
+	if err := validateSignalSourceSelector(name, request, "discriminator_field", cfg.DiscriminatorField); err != nil {
+		return err
+	}
+	if err := validateSignalSourceSelector(name, request, "run_id_field", cfg.RunIDField); err != nil {
+		return err
+	}
+	if cfg.ExpectedStateField != "" {
+		if err := validateSignalSourceSelector(name, request, "expected_state_field", cfg.ExpectedStateField); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSignalSourceMappings(
+	name string,
+	request RequestBinding,
+	cfg SignalSourceBinding,
+) error {
+	for discriminator, signal := range cfg.SignalMapping {
+		if discriminator == "" || strings.TrimSpace(signal) == "" {
+			return fmt.Errorf("endpoint %q signal_source signal_mapping keys and values must be non-empty", name)
+		}
+	}
+	for field, selector := range cfg.Payload {
+		if !validSignalPayloadField(field) {
+			return fmt.Errorf("endpoint %q signal_source payload field %q is invalid", name, field)
+		}
+		if err := validateSignalSourceSelector(name, request, "payload."+field, selector); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var signalSourceAuthorityFields = map[string]bool{
+	"signal": true, "profile": true, "profile_path": true, "machine": true, "method": true, "url": true, "host": true,
+	"machine_spec": true, "tools": true, "tool_declarations": true, "model": true, "model_config": true, "checkpoint": true, "checkpoint_connection": true,
+}
+
+func validateSignalSourceSelector(
+	name string,
+	request RequestBinding,
+	field string,
+	selector string,
+) error {
+	parsed, ok := core.ParseSelector(selector)
+	if !ok || parsed.Label != "" || len(parsed.Path) < 2 {
+		return fmt.Errorf("endpoint %q signal_source %s %q must be a declared $.group.field selector", name, field, selector)
+	}
+	group, requestField := parsed.Path[0], parsed.Path[1]
+	switch group {
+	case "body":
+		if !bodySchemaDeclares(request.BodySchema, requestField) {
+			return fmt.Errorf("endpoint %q signal_source %s selects undeclared body field %q", name, field, requestField)
+		}
+	case "query":
+		if _, ok := request.Query[requestField]; !ok || len(parsed.Path) != 2 {
+			return fmt.Errorf("endpoint %q signal_source %s selects undeclared query field %q", name, field, requestField)
+		}
+	case "path":
+		if _, ok := request.Path[requestField]; !ok || len(parsed.Path) != 2 {
+			return fmt.Errorf("endpoint %q signal_source %s selects undeclared path field %q", name, field, requestField)
+		}
+	case "headers":
+		_, declared := lookupHeaderSchema(request.Headers, requestField)
+		if !declared || len(parsed.Path) != 2 || requestField != strings.ToLower(requestField) {
+			return fmt.Errorf("endpoint %q signal_source %s selects undeclared header field %q", name, field, requestField)
+		}
+	default:
+		return fmt.Errorf("endpoint %q signal_source %s selects unsupported request group %q", name, field, group)
+	}
+	if signalSourceAuthorityFields[strings.ToLower(requestField)] {
+		return fmt.Errorf("endpoint %q signal_source %s cannot select caller program or signal authority %q", name, field, requestField)
+	}
+	return nil
+}
+
+func validSignalPayloadField(field string) bool {
+	return field != "" && field == strings.TrimSpace(field) &&
+		!strings.Contains(field, ".") && !strings.ContainsAny(field, "\r\n\t")
+}
+
+func validateSignalSourceSensitive(name string, cfg SignalSourceBinding) error {
+	seen := map[string]bool{}
+	for _, field := range cfg.Sensitive {
+		if seen[field] {
+			return fmt.Errorf("endpoint %q signal_source sensitive field %q is duplicated", name, field)
+		}
+		if _, ok := cfg.Payload[field]; !ok {
+			return fmt.Errorf("endpoint %q signal_source sensitive field %q is not mapped payload", name, field)
+		}
+		seen[field] = true
+	}
+	return nil
+}
+
+func validateSignalSourceResponses(name string, responses SignalSourceResponseMappings) error {
+	required := map[string]SignalSourceResponse{
+		"accepted": responses.Accepted, "refused_undeclared": responses.RefusedUndeclared, "source_validation": responses.SourceValidation, "machine_run_failed": responses.MachineRunFailed,
+	}
+	for outcome, response := range required {
+		if !validHTTPStatus(response.Status) {
+			return fmt.Errorf("endpoint %q signal_source response %s requires HTTP status 100-599", name, outcome)
+		}
+	}
+	if responses.RefusedConflict.Status != 0 && !validHTTPStatus(responses.RefusedConflict.Status) {
+		return fmt.Errorf("endpoint %q signal_source response refused_conflict has invalid HTTP status", name)
+	}
+	return nil
+}
+
+func validHTTPStatus(status int) bool {
+	return status >= 100 && status <= 599
+}
+
+func signalSourceYAMLSet(cfg SignalSourceBinding) bool {
+	return cfg.Source != "" || cfg.DiscriminatorField != "" || len(cfg.SignalMapping) > 0 || cfg.RunIDField != "" ||
+		cfg.ExpectedStateField != "" || len(cfg.Payload) > 0 ||
+		len(cfg.Sensitive) > 0 || cfg.Timeout != "" || cfg.Responses.Accepted.Status != 0 ||
+		cfg.Responses.RefusedUndeclared.Status != 0 || cfg.Responses.RefusedConflict.Status != 0 ||
+		cfg.Responses.SourceValidation.Status != 0 || cfg.Responses.MachineRunFailed.Status != 0
 }
 
 func validateStaticAssetsEndpoint(name string, endpoint Endpoint) error {

@@ -3,13 +3,8 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"database/sql"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,8 +18,6 @@ import (
 )
 
 const doltTestDB = "agent_core_test"
-
-var doltBin = flag.String("dolt-bin", "", "path or command name for the Dolt integration-test executable")
 
 // TestDoltCheckpointSuspendResumeRoundTrip proves same-process adapter reopen:
 // a run persisted through DoltCheckpoint is reloaded by a new adapter with an
@@ -276,107 +269,95 @@ func TestDoltCheckpointRevertResetsBranch(t *testing.T) {
 	require.Equal(t, "first-output", gotExec[0].Result.Output)
 }
 
-func TestDoltBinaryPrefersExplicitFlag(t *testing.T) {
-	previous := *doltBin
-	t.Cleanup(func() { *doltBin = previous })
-	*doltBin = " /declared/bin/dolt "
+func TestDoltCheckpointConversationReferencesAgainstRealDolt(t *testing.T) {
+	base := startDoltServer(t)
+	requireDoltTestDB(t, base)
+	dsn := base + doltTestDB
+	runID := fmt.Sprintf("run-ref-%d", time.Now().UnixNano())
+	noMerge := func(core.State) bool { return false }
 
-	require.Equal(t, "/declared/bin/dolt", doltBinary())
-}
-
-// doltBinary resolves the dolt executable: an explicit test flag wins,
-// otherwise the binary is looked up on PATH. An empty result means no dolt is
-// available and the gated tests skip.
-func doltBinary() string {
-	if configured := strings.TrimSpace(*doltBin); configured != "" {
-		return configured
+	saver, err := core.OpenDoltCheckpoint(dsn, runID, noMerge)
+	require.NoError(t, err)
+	firstPosition := core.Position{
+		CurrentState: "Working", LastSignal: core.LLMResponded,
+		Snapshot: core.AgentSnapshot{
+			State: "Working", Signal: core.LLMResponded, Iteration: 1,
+			Conversation: json.RawMessage(`[{"role":"user","content":"first"}]`),
+			Domain:       json.RawMessage(`{"corpus":"first"}`),
+		},
 	}
-	if path, err := exec.LookPath("dolt"); err == nil {
-		return path
-	}
-	return ""
-}
+	firstExecution := core.Execution{{
+		Iteration: 1, CommandName: "first", FromState: "Start", ToState: "Working",
+		Signal: core.LLMResponded, Result: core.DigestResult(core.Result{Signal: core.LLMResponded}),
+	}}
+	require.NoError(t, saver.Save(firstPosition, firstExecution))
+	firstRef, ok := saver.ConversationReference()
+	require.True(t, ok)
+	firstDomainRef, ok := saver.DomainReference()
+	require.True(t, ok)
+	require.Equal(t, firstRef, firstDomainRef)
 
-// startDoltServer launches a `dolt sql-server` from a prebuilt dolt binary on an
-// ephemeral port against a throwaway data directory, waits until it accepts
-// connections, and returns a database-less DSN base ("root@tcp(127.0.0.1:PORT)/").
-// The server is torn down when the test ends. It skips when no dolt binary is
-// installed so `go test ./...` stays green on machines without dolt, while
-// `mage integration:dolt` runs it for real.
-func startDoltServer(t *testing.T) string {
-	t.Helper()
-	bin := doltBinary()
-	if bin == "" {
-		t.Skip("no dolt binary found (install dolt or pass -dolt-bin); skipping Dolt integration test")
-	}
-
-	port := freeTCPPort(t)
-	dataDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, bin, "sql-server",
-		"--host=127.0.0.1",
-		fmt.Sprintf("--port=%d", port),
-		"--data-dir="+dataDir,
+	secondPosition := firstPosition
+	secondPosition.Snapshot.Iteration = 2
+	secondPosition.Snapshot.Conversation = json.RawMessage(
+		`[{"role":"user","content":"first"},{"role":"assistant","content":"second"}]`,
 	)
-	// DOLT_ROOT_HOST=% lets root connect over TCP from 127.0.0.1; the server
-	// otherwise only provisions root@localhost. The empty password matches the DSN.
-	cmd.Env = append(os.Environ(), "DOLT_ROOT_HOST=%", "DOLT_ROOT_PASSWORD=")
-	var log bytes.Buffer
-	cmd.Stdout = &log
-	cmd.Stderr = &log
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		cancel()
-		_ = cmd.Wait()
+	secondPosition.Snapshot.Domain = json.RawMessage(`{"corpus":"second"}`)
+	secondExecution := append(firstExecution, core.Entry{
+		Iteration: 2, CommandName: "second", FromState: "Working", ToState: "Working",
+		Signal: core.LLMResponded, Result: core.DigestResult(core.Result{Signal: core.LLMResponded}),
 	})
+	require.NoError(t, saver.Save(secondPosition, secondExecution))
+	require.NoError(t, saver.Close())
 
-	base := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
-	waitForDolt(t, base, &log)
-	return base
-}
-
-// freeTCPPort reserves an ephemeral port and releases it for the server to claim.
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	fresh, err := core.OpenDoltCheckpoint(dsn, runID, noMerge)
 	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
-	require.NoError(t, listener.Close())
-	return port
-}
-
-// waitForDolt polls the freshly started server until it answers a ping or the
-// deadline passes, surfacing the captured server log on timeout.
-func waitForDolt(t *testing.T, base string, log *bytes.Buffer) {
-	t.Helper()
-	db, err := sql.Open("dolt", base)
+	defer func() { require.NoError(t, fresh.Close()) }()
+	_, _, err = fresh.Load()
 	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := db.PingContext(ctx)
-		cancel()
-		if err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("dolt sql-server did not become ready within 60s: %v\nserver log:\n%s", err, log.String())
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-// requireDoltTestDB creates the shared test database on a database-less DSN base
-// so subsequent adapters can select it.
-func requireDoltTestDB(t *testing.T, base string) {
-	t.Helper()
-	db, err := sql.Open("dolt", base)
+	latestRef, ok := fresh.ConversationReference()
+	require.True(t, ok)
+	latestDomainRef, ok := fresh.DomainReference()
+	require.True(t, ok)
+	require.Equal(t, latestRef, latestDomainRef)
+	resolved, err := fresh.ResolveConversationSnapshot(firstRef)
 	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+doltTestDB)
+	require.JSONEq(t, string(firstPosition.Snapshot.Conversation), string(resolved))
+	domain, err := fresh.ResolveDomainSnapshot(firstDomainRef)
 	require.NoError(t, err)
+	require.Equal(t, []byte(firstPosition.Snapshot.Domain), domain)
+	domain, err = fresh.ResolveDomainSnapshot(latestDomainRef)
+	require.NoError(t, err)
+	require.Equal(t, []byte(secondPosition.Snapshot.Domain), domain)
+
+	firstParts := strings.Split(firstRef, ":")
+	latestParts := strings.Split(latestRef, ":")
+	require.Len(t, firstParts, 6)
+	require.Len(t, latestParts, 6)
+	wrongStep := append([]string(nil), latestParts...)
+	wrongStep[4] = firstParts[4]
+	_, err = fresh.ResolveConversationSnapshot(strings.Join(wrongStep, ":"))
+	require.ErrorIs(t, err, core.ErrConversationReferenceInvalid)
+	_, err = fresh.ResolveDomainSnapshot(strings.Join(wrongStep, ":"))
+	require.ErrorIs(t, err, core.ErrDomainReferenceInvalid)
+	wrongRevision := append([]string(nil), latestParts...)
+	wrongRevision[5] = firstParts[5]
+	_, err = fresh.ResolveConversationSnapshot(strings.Join(wrongRevision, ":"))
+	require.ErrorIs(t, err, core.ErrConversationReferenceInvalid)
+	_, err = fresh.ResolveDomainSnapshot(strings.Join(wrongRevision, ":"))
+	require.ErrorIs(t, err, core.ErrDomainReferenceInvalid)
+
+	require.NoError(t, fresh.Revert(runID, 0))
+	revertedRef, ok := fresh.ConversationReference()
+	require.True(t, ok)
+	require.Equal(t, firstRef, revertedRef)
+	resolved, err = fresh.ResolveConversationSnapshot(revertedRef)
+	require.NoError(t, err)
+	require.JSONEq(t, string(firstPosition.Snapshot.Conversation), string(resolved))
+	revertedDomainRef, ok := fresh.DomainReference()
+	require.True(t, ok)
+	require.Equal(t, firstDomainRef, revertedDomainRef)
+	domain, err = fresh.ResolveDomainSnapshot(revertedDomainRef)
+	require.NoError(t, err)
+	require.Equal(t, []byte(firstPosition.Snapshot.Domain), domain)
 }

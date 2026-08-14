@@ -3,6 +3,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -20,17 +21,54 @@ func (NoopCheckpoint) Load() (Position, Execution, error) {
 	return Position{}, nil, ErrNoCheckpoint
 }
 
-var _ Checkpoint = NoopCheckpoint{}
+func (NoopCheckpoint) ConversationReference() (string, bool) { return "", false }
+
+func (NoopCheckpoint) ResolveConversationSnapshot(string) (json.RawMessage, error) {
+	return nil, ErrConversationReferenceUnavailable
+}
+
+func (NoopCheckpoint) DomainReference() (string, bool) { return "", false }
+
+func (NoopCheckpoint) ResolveDomainSnapshot(string) ([]byte, error) {
+	return nil, ErrDomainReferenceUnavailable
+}
+
+var (
+	_ Checkpoint                    = NoopCheckpoint{}
+	_ ConversationReferenceProvider = NoopCheckpoint{}
+	_ ConversationSnapshotResolver  = NoopCheckpoint{}
+	_ DomainReferenceProvider       = NoopCheckpoint{}
+	_ DomainSnapshotResolver        = NoopCheckpoint{}
+)
 
 // InMemoryCheckpoint is the reference adapter for tests. It round-trips a
 // Position and Execution in process, including the folded conversation and
 // per-entry receipts, and is safe for concurrent use
 // (srd035-checkpoint-port R5.2).
 type InMemoryCheckpoint struct {
-	mu        sync.Mutex
-	saved     bool
-	position  Position
-	execution Execution
+	mu               sync.Mutex
+	runID            string
+	saved            bool
+	position         Position
+	execution        Execution
+	currentRef       string
+	currentDomainRef string
+	conversations    map[string][]byte
+	domains          map[string][]byte
+}
+
+type checkpointSnapshotReferences struct {
+	conversationRef string
+	conversation    []byte
+	domainRef       string
+	domain          []byte
+}
+
+// NewInMemoryCheckpoint creates a reference adapter with stable run isolation.
+// A zero-value InMemoryCheckpoint still supports Save/Load but reports
+// conversation references unavailable.
+func NewInMemoryCheckpoint(runID string) *InMemoryCheckpoint {
+	return &InMemoryCheckpoint{runID: runID}
 }
 
 func (c *InMemoryCheckpoint) Save(position Position, execution Execution) error {
@@ -44,12 +82,53 @@ func (c *InMemoryCheckpoint) Save(position Position, execution Execution) error 
 	if err != nil {
 		return fmt.Errorf("in-memory checkpoint save: %w", err)
 	}
+	references, err := c.prepareSnapshotReferences(position, execution)
+	if err != nil {
+		return fmt.Errorf("in-memory checkpoint save: %w", err)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.position = clonePosition(position)
 	c.execution = sanitized
 	c.saved = true
+	c.currentRef = references.conversationRef
+	c.currentDomainRef = references.domainRef
+	if references.conversationRef != "" {
+		if c.conversations == nil {
+			c.conversations = make(map[string][]byte)
+		}
+		c.conversations[references.conversationRef] = references.conversation
+	}
+	if references.domainRef != "" {
+		if c.domains == nil {
+			c.domains = make(map[string][]byte)
+		}
+		c.domains[references.domainRef] = references.domain
+	}
 	return nil
+}
+
+func (c *InMemoryCheckpoint) prepareSnapshotReferences(
+	position Position,
+	execution Execution,
+) (checkpointSnapshotReferences, error) {
+	conversationRef, conversation, err := c.snapshotReferenceFor(
+		position.Snapshot.Conversation,
+		execution,
+	)
+	if err != nil {
+		return checkpointSnapshotReferences{}, err
+	}
+	domainRef, domain, err := c.snapshotReferenceFor(position.Snapshot.Domain, execution)
+	if err != nil {
+		return checkpointSnapshotReferences{}, err
+	}
+	return checkpointSnapshotReferences{
+		conversationRef: conversationRef,
+		conversation:    conversation,
+		domainRef:       domainRef,
+		domain:          domain,
+	}, nil
 }
 
 func (c *InMemoryCheckpoint) Load() (Position, Execution, error) {
@@ -61,7 +140,87 @@ func (c *InMemoryCheckpoint) Load() (Position, Execution, error) {
 	return clonePosition(c.position), cloneExecution(c.execution), nil
 }
 
-var _ Checkpoint = (*InMemoryCheckpoint)(nil)
+func (c *InMemoryCheckpoint) ConversationReference() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentRef, c.currentRef != ""
+}
+
+func (c *InMemoryCheckpoint) ResolveConversationSnapshot(reference string) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snapshot, err := c.resolveSnapshot(
+		reference,
+		c.conversations,
+		ErrConversationReferenceInvalid,
+		ErrConversationReferenceUnavailable,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(snapshot), nil
+}
+
+func (c *InMemoryCheckpoint) DomainReference() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentDomainRef, c.currentDomainRef != ""
+}
+
+func (c *InMemoryCheckpoint) ResolveDomainSnapshot(reference string) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resolveSnapshot(
+		reference,
+		c.domains,
+		ErrDomainReferenceInvalid,
+		ErrDomainReferenceUnavailable,
+	)
+}
+
+func (c *InMemoryCheckpoint) snapshotReferenceFor(
+	snapshot []byte,
+	execution Execution,
+) (string, []byte, error) {
+	if c.runID == "" || len(execution) == 0 || len(snapshot) == 0 {
+		return "", nil, nil
+	}
+	digest := sha256.Sum256(snapshot)
+	ref, err := formatCheckpointReference("memory", c.runID, len(execution)-1, fmt.Sprintf("%x", digest))
+	if err != nil {
+		return "", nil, err
+	}
+	return ref, append([]byte(nil), snapshot...), nil
+}
+
+func (c *InMemoryCheckpoint) resolveSnapshot(
+	reference string,
+	snapshots map[string][]byte,
+	invalid, unavailable error,
+) ([]byte, error) {
+	parsed, err := parseCheckpointReference(reference)
+	if err != nil || parsed.backend != "memory" || parsed.runID != c.runID {
+		return nil, fmt.Errorf("%w: in-memory checkpoint", invalid)
+	}
+	if snapshot, ok := snapshots[reference]; ok {
+		return append([]byte(nil), snapshot...), nil
+	}
+	for knownReference := range snapshots {
+		known, knownErr := parseCheckpointReference(knownReference)
+		if knownErr == nil && (known.step == parsed.step || known.revision == parsed.revision) {
+			return nil, fmt.Errorf("%w: in-memory checkpoint", invalid)
+		}
+	}
+	return nil, fmt.Errorf("%w: in-memory checkpoint", unavailable)
+}
+
+var (
+	_ Checkpoint                    = (*InMemoryCheckpoint)(nil)
+	_ ConversationReferenceProvider = (*InMemoryCheckpoint)(nil)
+	_ ConversationSnapshotResolver  = (*InMemoryCheckpoint)(nil)
+	_ DomainReferenceProvider       = (*InMemoryCheckpoint)(nil)
+	_ DomainSnapshotResolver        = (*InMemoryCheckpoint)(nil)
+)
 
 // clonePosition copies a Position so callers cannot mutate persisted state
 // through the shared conversation byte slice.

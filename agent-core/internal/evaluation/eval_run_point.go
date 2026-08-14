@@ -74,34 +74,33 @@ func (c *runPointCmd) Execute() core.Result {
 			CommandName: "run_point",
 		}
 	}
-	agentName := c.config.AgentName
-	if agentName == "" {
-		agentName = "critic-point"
-	}
-	maxIter := c.config.MaxIterations
-	if maxIter <= 0 {
-		maxIter = 20
-	}
-	successState := c.config.SuccessState
-	if successState == "" {
-		successState = "Done"
-	}
-
 	tracer := c.es.Tracer
 	if tracer == nil {
 		tracer = tracing.NoopTracer{}
 	}
+	pointSpec, err := c.pointMachineSpec()
+	if err != nil {
+		c.es.RecordPoint(pc)
+		return core.Result{
+			Signal:      core.CommandError,
+			Err:         fmt.Errorf("run_point: nested point loop: %w", err),
+			Output:      err.Error(),
+			CommandName: c.Name(),
+		}
+	}
 	params := core.LoopParams{
-		MachineFile: c.es.PointMachine,
-		AgentName:   agentName,
-		Trace:       tracer,
+		MachineFile:    c.es.PointMachine,
+		MachineSpec:    pointSpec,
+		CommandTimeout: pointSpec.BudgetSpec.CommandTimeoutDuration(),
+		AgentName:      c.config.AgentName,
+		Trace:          tracer,
 		Budget: core.Budget{
-			MaxIterations: maxIter,
+			MaxIterations: c.config.MaxIterations,
 		},
 		Registry: c.pointRegistry,
 		Hooks: core.LoopHooks{
 			TerminalStatus: func(s core.State) core.RunStatus {
-				if s == core.State(successState) {
+				if s == core.State(c.config.SuccessState) {
 					return core.StatusSucceeded
 				}
 				return core.StatusFailed
@@ -177,6 +176,18 @@ func (c *runPointCmd) bindPointContext() error {
 	return nil
 }
 
+func (c *runPointCmd) pointMachineSpec() (*core.MachineSpec, error) {
+	if c.es.PointSpec != nil {
+		return c.es.PointSpec, nil
+	}
+	spec, err := core.LoadMachineSpec(c.es.PointMachine)
+	if err != nil {
+		return nil, err
+	}
+	c.es.PointSpec = &spec
+	return c.es.PointSpec, nil
+}
+
 // RunPointFactory creates a registry.BuiltinFactory for run_point.
 // Nested loop parameters (point_machine, point_tools, agent_name,
 // max_iterations, success_state) are read from the tool declaration config block.
@@ -189,7 +200,12 @@ func RunPointFactory(es *EvalSessionState) toolregistry.BuiltinFactory {
 		if err := catalog.ValidateRunPointConfig(def.Name, cfg); err != nil {
 			return nil, err
 		}
+		pointSpec, err := core.LoadMachineSpec(cfg.PointMachine)
+		if err != nil {
+			return nil, fmt.Errorf("run_point: load point machine: %w", err)
+		}
 		es.PointMachine = cfg.PointMachine
+		es.PointSpec = &pointSpec
 		pointRegistry, err := buildPointRegistry(&es.EvalState, cfg)
 		if err != nil {
 			return nil, err
@@ -239,7 +255,11 @@ func pointToolFactories(es *EvalState) (*toolregistry.BuiltinRegistry, toolregis
 	// run_agent emits path/content parameters and the point machine dispatches
 	// the generic write word rooted at the current point workspace.
 	builtins.Register("file_write", func(def catalog.ToolDef, _ map[string]string) (core.Builder, error) {
-		return &filesystem.WriteBuilder{RootFunc: pointRoot, Metrics: def.Metrics}, nil
+		return &filesystem.WriteBuilder{
+			RootFunc:     pointRoot,
+			UndoStrategy: def.Undo.Strategy,
+			Metrics:      def.Metrics,
+		}, nil
 	})
 	execFactory := func(def catalog.ToolDef, _ string) core.Builder {
 		return &toolexec.ExecBuilder{Def: def, RootFunc: pointRoot}

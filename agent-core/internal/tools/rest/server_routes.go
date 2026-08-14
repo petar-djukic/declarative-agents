@@ -22,6 +22,7 @@ const (
 	bindingHealth           = "health"
 	bindingStaticMetadata   = "static_metadata"
 	bindingMachineRequest   = "machine_request"
+	bindingSignalSource     = "signal_source"
 	bindingLifecycleControl = "lifecycle_control"
 	bindingMonitorProxy     = "monitor_proxy"
 	bindingMock             = "mock"
@@ -37,8 +38,9 @@ const (
 	lifecycleExitPath = "/api/lifecycle/exit"
 	// lifecycleExitSignal is the grammar signal the injected exit endpoint emits.
 	lifecycleExitSignal = "ExitRequested"
-	// lifecycleActionExit is the lifecycle_control action the injected endpoint runs.
-	lifecycleActionExit = "exit"
+	// lifecycleActionEnqueueSignal names the fixed-signal enqueue mode used by
+	// the injected endpoint.
+	lifecycleActionEnqueueSignal = "enqueue_signal"
 )
 
 // handledServerBindings is the closed set of endpoint bindings handleEndpoint
@@ -57,6 +59,7 @@ var handledServerBindings = map[string]bool{
 	bindingHealth:           true,
 	bindingStaticMetadata:   true,
 	bindingMachineRequest:   true,
+	bindingSignalSource:     true,
 	bindingStaticAssets:     true,
 	bindingRedirect:         true,
 	bindingMonitorProxy:     true,
@@ -135,16 +138,41 @@ func (r *serverRuntime) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleEndpoint(w, req, name, endpoint, nil)
 		return
 	}
-	payload, err := readRequestPayload(req, endpoint, r.def.Limits.MaxRequestBytes)
+	payload, err := r.readEndpointPayload(req, endpoint, vars)
 	if err != nil {
-		writeRequestError(w, err)
-		return
-	}
-	if err := addPathValues(payload, endpoint.Request.Path, vars); err != nil {
-		writeRequestError(w, err)
+		r.writeEndpointRequestError(w, req, name, endpoint, err)
 		return
 	}
 	r.handleEndpoint(w, req, name, endpoint, payload)
+}
+
+func (r *serverRuntime) readEndpointPayload(
+	req *http.Request,
+	endpoint Endpoint,
+	vars map[string]string,
+) (map[string]interface{}, error) {
+	payload, err := readRequestPayload(req, endpoint, r.def.Limits.MaxRequestBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := addPathValues(payload, endpoint.Request.Path, vars); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (r *serverRuntime) writeEndpointRequestError(
+	w http.ResponseWriter,
+	req *http.Request,
+	name string,
+	endpoint Endpoint,
+	err error,
+) {
+	if endpoint.Binding == bindingSignalSource {
+		r.handleSignalSourceValidationError(w, req, name, endpoint, err)
+		return
+	}
+	writeRequestError(w, err)
 }
 
 func (r *serverRuntime) authorizeEndpoint(
@@ -250,6 +278,8 @@ func (r *serverRuntime) handleEndpoint(
 		r.writeStaticMetadata(w, endpoint)
 	case bindingMachineRequest:
 		r.handleMachineRequest(w, req, name, endpoint, payload)
+	case bindingSignalSource:
+		r.handleSignalSource(w, req, name, endpoint, payload)
 	case bindingStaticAssets:
 		r.serveStaticAssets(w, req, endpoint)
 	case bindingRedirect:
@@ -544,16 +574,6 @@ func writeLifecycleAuthError(w http.ResponseWriter, err error) {
 func lifecycleSignal(endpoint Endpoint) string {
 	if endpoint.LifecycleControl.Signal != "" {
 		return endpoint.LifecycleControl.Signal
-	}
-	switch endpoint.LifecycleControl.Action {
-	case "exit":
-		return "ExitRequested"
-	case "pause":
-		return "PauseRequested"
-	case "rollback_request":
-		return "RollbackRequested"
-	case "resume":
-		return "ResumeRequested"
 	}
 	return endpoint.Signal
 }

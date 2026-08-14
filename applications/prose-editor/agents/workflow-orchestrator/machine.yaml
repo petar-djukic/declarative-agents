@@ -13,6 +13,7 @@ invariants:
   - No voice, style, Pangram, publication, Helm, kind, or applier action exists.
 initial_state: AwaitingRequest
 budget:
+  command_timeout: 11m
   max_iterations: 64
   max_tokens: 100000
   max_duration: 10m0s

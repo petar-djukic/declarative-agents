@@ -124,13 +124,13 @@ test_cases:
       - srd005-agentic-loop AC2
 
   - use_case: rel00.0-uc001-domain-agent-integration
-    name: Default terminal status maps Succeeded, BudgetExceeded, and others
-    go_test: TestLoop_DefaultTerminalStatus
+    name: Omitted terminal status fails closed regardless of state spelling
+    go_test: TestLoop_OmittedTerminalStatusFailsClosed
     inputs:
       states: "[Succeeded, BudgetExceeded, Anything]"
     expected:
-      succeeded_status: succeeded
-      budget_status: budget_exceeded
+      succeeded_status: failed
+      budget_status: failed
       other_status: failed
     traces:
       - srd005-agentic-loop AC5
@@ -307,6 +307,25 @@ test_cases:
       malformed_config_rejected_before_dispatch: true
     traces:
       - srd022-builtin-tools AC7
+
+  - use_case: rel00.0-uc001-domain-agent-integration
+    name: Profile closure inspection enforces finite operation authorities before dispatch
+    go_test: go test ./pkg/profileaudit ./cmd/agent -run 'TestInspect|TestStartupEnforcesProfileTimeoutClosure'
+    inputs:
+      missing_command_timeout: true
+      valid_command_timeout: 1m
+      closure_edges: [declaration_include_override, dynamic_selection, rest_machine_request, child_profile, evaluator_point_machine, compatibility_wrapper]
+      authorities: [tooldef_timeout, rest_limits, machine_request, model, child_service, evaluator_point, blocking_await]
+    expected:
+      missing_value_rejected: true
+      positive_finite_value_accepted: true
+      environment_expanded_before_comparison: true
+      malformed_non_positive_equal_and_larger_rejected: true
+      diagnostics_are_deterministic: true
+      normal_startup_and_validate_config_enforce_before_dispatch: true
+      core_fixtures_do_not_discover_application_catalog: true
+    traces:
+      - srd006-yaml-machine-config AC6
 
   # --- srd001: core types (verified by compilation and loop tests) ---
   - use_case: rel00.0-uc001-domain-agent-integration
@@ -918,6 +937,54 @@ test_cases:
       optional_empty_values_omitted: true
     traces:
       - srd015-genai-semconv AC3
+
+  - use_case: rel00.0-uc001-domain-agent-integration
+    name: Delta capture isolates current-turn messages and prompt hashes
+    go_test: TestInvokeLLMDeltaCaptureIsolatesTwoTurns
+    inputs:
+      turns: 2
+      capture_level: delta
+    expected:
+      current_user_and_assistant_only: true
+      full_message_attributes_absent: true
+      rendered_system_prompt_hash_stable: true
+    traces:
+      - srd015-genai-semconv AC5
+      - srd015-genai-semconv AC6
+
+  - use_case: rel00.0-uc001-domain-agent-integration
+    name: Full capture emits input and assistant message arrays
+    go_test: TestInvokeLLMDispatchTracerIsolatesTwoTurns
+    inputs:
+      turns: 2
+      capture_level: full
+    expected:
+      input_message_array_valid: true
+      output_message_array_valid: true
+    traces:
+      - srd015-genai-semconv AC5
+
+  - use_case: rel00.0-uc001-domain-agent-integration
+    name: Off capture omits model and parser content
+    go_test: TestCaptureOffRecordsNoContent
+    inputs:
+      capture_level: off
+    expected:
+      model_content_absent: true
+      parser_raw_output_absent: true
+    traces:
+      - srd015-genai-semconv AC5
+
+  - use_case: rel00.0-uc001-domain-agent-integration
+    name: Conversation references are emitted only when available
+    go_test: TestInvokeLLMConversationReferenceIsOptional
+    inputs:
+      providers: "missing, unavailable, empty, available"
+    expected:
+      missing_reference_omitted: true
+      available_reference_emitted: true
+    traces:
+      - srd015-genai-semconv AC6
 
   - use_case: rel00.0-uc001-domain-agent-integration
     name: Traceparent formats valid and invalid contexts

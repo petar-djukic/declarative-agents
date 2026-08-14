@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/undo"
@@ -75,6 +76,59 @@ func TestRESTClient_CompensationExecutorReportsMissingOperation(t *testing.T) {
 	require.Contains(t, result.Output, "compensation_lookup")
 }
 
+func TestRESTClient_CompensationExecutorHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, "/repos/acme/agent-core/issues/ISS-1", req.URL.Path)
+		close(started)
+		select {
+		case <-req.Context().Done():
+		case <-release:
+			writeJSON(w, http.StatusOK, map[string]interface{}{"title": "late", "id": "ISS-1"})
+		}
+	}))
+	defer upstream.Close()
+	def := clientDefinition(t, upstream.URL, issueClient())
+	receipt := undo.EncodeBoundaryReceipt(undo.BoundaryCompensationPayload{
+		BoundaryCompensation: undo.BoundaryCompensation{
+			Strategy: "restore",
+			Data: map[string]interface{}{
+				"rest_ref": "github", "resource": "issue", "operation": "set",
+				"parameters":  params("1", "new"),
+				"resource_id": "ISS-1",
+				"compensation": map[string]interface{}{
+					"operation": "set", "parameters": map[string]interface{}{"title": "restored"},
+				},
+			},
+		},
+	})
+	require.NotEmpty(t, receipt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan core.Result, 1)
+	go func() {
+		results <- restCompensationExecutor(t, def).CompensateFromReceipt(ctx, "set", receipt)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("compensation request did not start")
+	}
+	cancel()
+
+	select {
+	case result := <-results:
+		close(release)
+		require.Equal(t, core.CommandError, result.Signal)
+		require.ErrorContains(t, result.Err, context.Canceled.Error())
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("compensation did not return after context cancellation")
+	}
+}
+
 func TestRESTClient_ChromaAddFreshUndoUsesConfiguredDelete(t *testing.T) {
 	t.Parallel()
 
@@ -105,7 +159,9 @@ func TestRESTClient_ChromaAddFreshUndoUsesConfiguredDelete(t *testing.T) {
 	defer upstream.Close()
 
 	collection := NewCollection()
-	require.NoError(t, collection.Add(chromaCompensationDefinition(upstream.URL)))
+	definition := chromaCompensationDefinition(upstream.URL)
+	require.NoError(t, ValidateDefinition(definition))
+	require.NoError(t, collection.Add(definition))
 	add, err := collection.ResolveClientOperation(ClientToolConfig{RestRef: "chroma", Operation: "add_records"})
 	require.NoError(t, err)
 	builder := ClientBuilder{
@@ -154,13 +210,17 @@ func chromaCompensationDefinition(baseURL string) Definition {
 				"add_records": {
 					Method: http.MethodPost, Path: "/collections/{collection}/add", Params: params, Body: body,
 					Success:       StatusMapping{Status: []int{http.StatusCreated}, Signal: "DocumentAdded"},
+					SideEffects:   []SideEffect{{Kind: "external_api", Target: "chroma.records", State: "records_added"}},
 					Reversibility: Reversibility{Classification: "compensatable", Undo: "delete_records"},
 					Compensation:  map[string]interface{}{"operation": "delete_records"},
 				},
 				"delete_records": {
 					Method: http.MethodPost, Path: "/collections/{collection}/delete", Params: params, Body: body,
-					Success:       StatusMapping{Status: []int{http.StatusOK}, Signal: "DocumentDeleted"},
-					Reversibility: Reversibility{Classification: "irreversible", Undo: "irreversible"},
+					Success:     StatusMapping{Status: []int{http.StatusOK}, Signal: "DocumentDeleted"},
+					SideEffects: []SideEffect{{Kind: "external_api", Target: "chroma.records", State: "records_deleted"}},
+					Reversibility: Reversibility{
+						Classification: "irreversible", Undo: "irreversible", RequiresConfirmation: true,
+					},
 				},
 			},
 		}},

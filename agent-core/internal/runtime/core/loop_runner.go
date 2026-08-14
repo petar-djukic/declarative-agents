@@ -89,7 +89,7 @@ func initialSignalResult(p LoopParams) (Signal, Result) {
 	if res.Signal == "" {
 		res.Signal = p.InitialSignal
 	}
-	if res.Output == "" {
+	if res.Output == "" && !p.PreserveInitialResultOutput {
 		res.Output = "Resume."
 	}
 	return p.InitialSignal, res
@@ -102,7 +102,7 @@ func taskCompletedSignal(params LoopParams) Signal {
 	if params.MachineSpec != nil && params.MachineSpec.SummarySignal != "" {
 		return Signal(params.MachineSpec.SummarySignal)
 	}
-	return TaskCompleted
+	return ""
 }
 
 func (r *loopRunner) recordStart() {
@@ -356,11 +356,12 @@ func (r *loopRunner) recordCheckpointFailure(err error) {
 
 func (r *loopRunner) dispatchContext(labels MetricLabels) monitor.DispatchContext {
 	return monitor.DispatchContext{
-		RunID:        r.params.RunID,
-		AgentName:    r.params.AgentName,
-		State:        string(r.state),
-		Iteration:    r.iteration,
-		MetricLabels: labels,
+		RunID:          r.params.RunID,
+		ConversationID: loopConversationID(r.params),
+		AgentName:      r.params.AgentName,
+		State:          string(r.state),
+		Iteration:      r.iteration,
+		MetricLabels:   labels,
 	}
 }
 

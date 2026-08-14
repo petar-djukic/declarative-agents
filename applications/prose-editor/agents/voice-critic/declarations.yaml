@@ -36,7 +36,7 @@ tools:
       parsed: CriticRequestValid
       unparsed: CriticRequestRejected
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Request validation changes no state.}
 
   - name: compose_critic_evaluation_context
@@ -58,7 +58,7 @@ tools:
         Independently assess this immutable original and structure candidate:
         {"original":{{ json original_content }},"original_sha256":{{ json original_content_hash }},"candidate":{{ json candidate_content }},"candidate_sha256":{{ json candidate_content_hash }}}
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Context composition changes no state.}
 
   - name: evaluate_structure_candidate
@@ -94,7 +94,7 @@ tools:
     side_effects:
       - {kind: external_api, target: configured_model, state: inference_observed}
       - {kind: state_mutation, target: conversation_history, state: appended}
-    reversibility: {classification: reversible, undo: conversation_truncate}
+    reversibility: {classification: reversible}
     undo: {strategy: conversation_truncate, description: Restore pre-call conversation state.}
 
   - name: capture_critic_evaluation
@@ -111,7 +111,7 @@ tools:
         response: $.
       template: '{"response": {{ json response }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Capturing output changes no state.}
 
   - name: parse_critic_evaluation
@@ -189,7 +189,7 @@ tools:
       parsed: CriticEvaluationParsed
       unparsed: CriticEvaluationInvalid
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Parsing changes no state.}
 
   - name: critic_original_hash_matches
@@ -208,7 +208,7 @@ tools:
       satisfied: CriticOriginalHashMatched
       unsatisfied: CriticOriginalHashMismatched
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Comparing hashes changes no state.}
 
   - name: critic_candidate_hash_matches
@@ -227,7 +227,7 @@ tools:
       satisfied: CriticCandidateHashMatched
       unsatisfied: CriticCandidateHashMismatched
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Comparing hashes changes no state.}
 
   - name: critic_verdict_is_pass
@@ -246,7 +246,7 @@ tools:
       satisfied: CriticPassed
       unsatisfied: CriticRejected
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Comparing a verdict changes no state.}
 
   - name: compose_critic_pass_response
@@ -268,7 +268,7 @@ tools:
         feedback: $from(critic_evaluation).feedback
       template: '{"verdict":{{ json verdict }},"responsible_stage":{{ json responsible_stage }},"original_content_hash":{{ json original_content_hash }},"candidate_content_hash":{{ json candidate_content_hash }},"findings":{{ json findings }},"feedback":{{ json feedback }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Response composition changes no state.}
 
   - name: compose_critic_reject_response
@@ -290,5 +290,5 @@ tools:
         feedback: $from(critic_evaluation).feedback
       template: '{"verdict":{{ json verdict }},"responsible_stage":{{ json responsible_stage }},"original_content_hash":{{ json original_content_hash }},"candidate_content_hash":{{ json candidate_content_hash }},"findings":{{ json findings }},"feedback":{{ json feedback }}}'
     side_effects: []
-    reversibility: {classification: reversible, undo: noop}
+    reversibility: {classification: reversible}
     undo: {strategy: noop, description: Response composition changes no state.}
