@@ -15,7 +15,7 @@ release_03_0_support:
     - rest.version, clients, servers, openapi, auth, limits, retry_policies, and response_mappings.
     - REST client resource operations and RPC-shaped operations.
     - REST client async send and await by request_id.
-    - REST server emit_signal, emit_dynamic_signal, read_state, invoke_handler, stream_events, health, static_metadata, machine_request, and monitor endpoints.
+    - REST server emit_signal, emit_dynamic_signal, read_state, invoke_handler, stream_events, health, static_metadata, machine_request, signal_source, and monitor endpoints.
     - OpenAPI import from local files into client operations and server endpoints.
     - network.cidrs parsing and CIDR enforcement.
     - async correlation selectors and wire-level idempotency metadata; readiness polling is authored as explicit REST probe and lifecycle delay states in MachineSpec.
@@ -23,12 +23,60 @@ release_03_0_support:
     - OpenAPI-bound endpoint preservation for configured endpoint behavior.
     - REST client compensation mementos and rollback-time execution for mutating operations with configured compensation.
     - machine_request terminal response schema validation before success responses.
-    - lifecycle_control endpoints: ValidateDefinition validates the action (exit, pause, rollback_request, resume, inject_signal) and the rollback selector, and the endpoint enqueues the lifecycle request event for MachineSpec routing rather than running a lifecycle operation directly (TestRESTServer_LifecycleControlEnqueuesSignals).
-    - canonical lifecycle-exit injection: agent-core synthesizes a POST /api/lifecycle/exit lifecycle_control endpoint (action exit, signal ExitRequested) for every served agent at launch, so a profile need not declare it. Injection is skipped when the server opts out (lifecycle_exit.disabled), already declares the canonical path, or already uses the reserved route name, and never mutates the resolved endpoint map. A declared auth_ref is enforced before enqueue; auth:none is loopback-only even when listener policy permits a public bind (TestRESTServer_InjectsCanonicalLifecycleExit, TestInjectedLifecycleExitEnforcesDeclaredBearerAuth). Hand-declared emit_signal control routes remain supported.
+    - lifecycle_control endpoints: ValidateDefinition accepts only fixed enqueue_signal and allowlisted inject_signal modes; both enqueue events for MachineSpec routing rather than running lifecycle operations directly (TestRESTServer_LifecycleControlEnqueuesSignals).
+    - canonical lifecycle-exit injection: agent-core synthesizes a POST /api/lifecycle/exit lifecycle_control endpoint (action enqueue_signal, signal ExitRequested) for every served agent at launch, so a profile need not declare it. Injection is skipped when the server opts out (lifecycle_exit.disabled), already declares the canonical path, or already uses the reserved route name, and never mutates the resolved endpoint map. A declared auth_ref is enforced before enqueue; auth:none is loopback-only even when listener policy permits a public bind (TestRESTServer_InjectsCanonicalLifecycleExit, TestInjectedLifecycleExitEnforcesDeclaredBearerAuth). Hand-declared emit_signal control routes remain supported.
   partial:
     - rest_await_event read_policy values outside the implemented first-available behavior are rejected during ToolDef factory validation.
   reserved:
     - document_resources top-level config and machine_request.document_resources are typed target-format fields that ValidateDefinition rejects until generic REST document resource loading is implemented. Current request machines use profile-selected filesystem resource ToolDefs.
+
+timeout_envelope:
+  authority: |
+    A selected REST client operation derives its finite authority from the
+    referenced client limit profile and its async timeout where applicable. A
+    machine_request endpoint derives its outer request authority from
+    machine_request.timeout and separately inspects the referenced request
+    profile or machine. A signal_source endpoint derives its finite host-run
+    authority from signal_source.timeout. REST await words derive their
+    authority from the selected ToolDef config and referenced queue or source
+    timeout.
+  environment_expansion: |
+    REST definitions and ToolDef declarations expand ${VAR} and
+    ${VAR:-default} before timeout-envelope validation. The MachineSpec that
+    dispatches the selected REST word supplies the finite maximum: every
+    expanded operation timeout must remain strictly below
+    budget.command_timeout. Equal, malformed, non-positive, or larger expanded
+    values fail startup before network or queue dispatch. Deployment schemas
+    may enforce tighter bounds but cannot replace this runtime comparison.
+  retry_aggregate: |
+    A client with retry_ref derives one conservative dispatch authority from
+    its selected request timeout and retry policy. For A attempts with
+    per-attempt timeout T, the aggregate is A*T plus the delay before each
+    retry: sum(delay(i), i=1..A-1). attempts shall be a positive integer.
+    A missing retry_ref target, malformed duration, non-positive attempt count,
+    or duration-arithmetic overflow fails startup.
+
+    none contributes zero delay. fixed and the legacy empty backoff contribute
+    min(initial_delay, max_delay) before every retry when max_delay is positive.
+    exponential contributes initial_delay, then doubles for each later retry
+    with overflow-safe saturation at a positive max_delay when present. The
+    inspector uses checked arithmetic rather than treating time.Duration
+    saturation as a finite authority.
+
+    The aggregate applies to synchronous client words and rest_client_send.
+    rest_client_await reads previously stored async state in a later dispatch,
+    so its async.timeout remains a separate authority and does not acquire the
+    submission retry aggregate.
+  retry_evidence: |
+    Deterministic inspection evidence names the client, retry_ref, attempts,
+    normalized backoff, aggregate duration, and enclosing command_timeout.
+    The ordinary client limit entries remain visible as per-attempt evidence.
+  closure_resolution: |
+    Validation follows profile REST definitions, declaration includes and
+    profile-local override precedence, machine_request profile or machine
+    references, and compatibility wrappers. Diagnostics name the selected
+    action, REST authority path, operation duration, and enclosing machine
+    command timeout.
 
 schema:
   description: |
@@ -387,7 +435,7 @@ schema:
       - field: attempts
         type: int
         required: true
-        description: Maximum attempts including the first try.
+        description: Strictly positive maximum attempts including the first try.
       - field: backoff
         type: string
         required: false
@@ -481,7 +529,7 @@ schema:
       - field: binding
         type: string
         required: true
-        description: Endpoint binding kind from srd029-rest-server-tools R5 or srd030-machine-request-rest-binding.
+        description: Endpoint binding kind from srd029-rest-server-tools R5, srd030-machine-request-rest-binding, or srd046-request-driven-signal-source. signal_source is independent from machine_request and drives the injected host-profile SignalSource without an inbound queue.
       - field: monitor_view
         type: string
         required: false
@@ -518,11 +566,15 @@ schema:
       - field: lifecycle_control
         type: lifecycle_control_config
         required: false
-        description: Lifecycle control request mapping. ValidateDefinition validates the action (exit, pause, rollback_request, resume, inject_signal) and the rollback selector; the endpoint enqueues the lifecycle request event for MachineSpec routing rather than running a lifecycle operation directly. agent-core injects a canonical lifecycle_control exit endpoint per served agent (see rest_server.lifecycle_exit), so most profiles need not declare one; hand-declared emit_signal control endpoints remain a supported alternative.
+        description: Lifecycle control request mapping. ValidateDefinition accepts fixed enqueue_signal and allowlisted inject_signal modes plus an optional target selector; the endpoint enqueues the lifecycle request event for MachineSpec routing rather than running a lifecycle operation directly. agent-core injects a canonical lifecycle_control exit endpoint per served agent (see rest_server.lifecycle_exit), so most profiles need not declare one; hand-declared emit_signal control endpoints remain a supported alternative.
       - field: machine_request
         type: machine_request_config
         required: false
         description: Request-to-machine mapping used when binding is machine_request.
+      - field: signal_source
+        type: signal_source_config
+        required: false
+        description: Trusted request-to-SignalEnvelope mapping used only when binding is signal_source.
       - field: request
         type: request_binding
         required: false
@@ -591,7 +643,7 @@ schema:
       - field: action
         type: string
         required: true
-        description: One of exit, pause, rollback_request, resume, or inject_signal. When signal is omitted, the first four select ExitRequested, PauseRequested, RollbackRequested, or ResumeRequested respectively; inject_signal selects only from allowed_signals.
+        description: One of enqueue_signal or inject_signal. enqueue_signal requires a configured signal; inject_signal reads an allowlisted signal from the request.
       - field: signal
         type: string
         required: false
@@ -705,6 +757,84 @@ schema:
         type: json_schema
         required: false
         description: Response body schema that terminal output should satisfy. Validation is enforced before machine_request writes a success response.
+
+  signal_source_config:
+    note: REST definitions load this mapping with strict field checking. Runtime input supplies only values selected by these trusted selectors and cannot provide a raw signal or program authority.
+    fields:
+      - field: source
+        type: string
+        required: true
+        description: Configured source identity copied to SignalEnvelope.source and bounded trace attributes.
+      - field: discriminator_field
+        type: string
+        required: true
+        description: Declared $.body, $.query, $.path, or $.headers selector whose string value is looked up only in signal_mapping.
+      - field: signal_mapping
+        type: map[string]string
+        required: true
+        description: Non-empty closed discriminator mapping to trusted signal names. Unknown keys return refused_undeclared without invoking the host runner.
+      - field: run_id_field
+        type: string
+        required: true
+        description: Declared request selector yielding the non-empty host run id.
+      - field: expected_state_field
+        type: string
+        required: false
+        description: Optional declared request selector yielding the expected-state admission guard.
+      - field: payload
+        type: map[string]string
+        required: true
+        description: Non-empty output-field to declared-request-selector mapping used to construct SignalEnvelope.payload.
+      - field: sensitive
+        type: "[]string"
+        required: false
+        description: Payload output fields converted to typed core.OutputRedactionPath values before admission. Every entry must name a payload mapping key.
+      - field: timeout
+        type: duration string
+        required: true
+        description: Positive maximum time for admission and the accepted host run.
+      - field: responses
+        type: signal_source_response_mappings
+        required: true
+        description: HTTP policy selected after source validation or admission; it does not rewrite accepted when the later run fails.
+
+  signal_source_response_mappings:
+    fields:
+      - field: accepted
+        type: signal_source_response
+        required: true
+        description: Response for an accepted admission whose run did not fail.
+      - field: refused_undeclared
+        type: signal_source_response
+        required: true
+        description: Response for an unknown discriminator or core refused_undeclared outcome.
+      - field: refused_conflict
+        type: signal_source_response
+        required: false
+        description: Response for refused_conflict. Status defaults to HTTP 409 when omitted.
+      - field: source_validation
+        type: signal_source_response
+        required: true
+        description: Response for transport, schema, mapping, or caller-authority validation failure. The runner is not called.
+      - field: machine_run_failed
+        type: signal_source_response
+        required: true
+        description: Response policy for runner failure, timeout, cancellation, or an accepted admission whose run later failed.
+
+  signal_source_response:
+    fields:
+      - field: status
+        type: int
+        required: true
+        description: HTTP status in the range 100-599.
+      - field: include_diagnostic
+        type: bool
+        required: false
+        description: Permits a redacted stage or diagnostic in addition to the fixed outcome fields.
+      - field: include_output
+        type: bool
+        required: false
+        description: Permits the redacted terminal run summary in addition to the fixed outcome fields.
 
   document_resource:
     fields:
@@ -1330,7 +1460,7 @@ format_examples:
               path: /api/lifecycle/exit
               binding: lifecycle_control
               lifecycle_control:
-                action: exit
+                action: enqueue_signal
                 signal: AgentExitRequested
                 target_schema:
                   type: object
@@ -1342,14 +1472,14 @@ format_examples:
               path: /api/lifecycle/pause
               binding: lifecycle_control
               lifecycle_control:
-                action: pause
+                action: enqueue_signal
                 signal: PauseRequested
             rollback:
               method: POST
               path: /api/lifecycle/rollback
               binding: lifecycle_control
               lifecycle_control:
-                action: rollback_request
+                action: enqueue_signal
                 signal: RollbackRequested
                 target_schema:
                   type: object
@@ -1529,7 +1659,7 @@ validation_rules:
   - id: V16
     rule: Event source stopped_behavior MUST be one of ignore, emit_server_stopped, or command_error.
   - id: V17
-    rule: lifecycle_control endpoints with action inject_signal MUST declare allowed_signals.
+    rule: lifecycle_control enqueue_signal endpoints MUST declare signal; inject_signal endpoints MUST declare allowed_signals.
   - id: V18
     rule: lifecycle_control endpoints MUST enqueue declared signals and MUST NOT execute lifecycle operations inside HTTP handlers.
   - id: V19
@@ -1581,6 +1711,23 @@ validation_rules:
       network, redirect, and credential-scope policies before network I/O, so a
       resolved port outside the client's ports allowlist is refused.
       Runtime input_mapping authority fields remain forbidden.
+  - id: V37
+    rule: |
+      A non-empty client retry_ref MUST resolve to one retry policy whose
+      attempts is positive. Timeout-envelope inspection MUST add the selected
+      request timeout once per attempt plus every fixed or capped exponential
+      delay before attempts two through N using checked duration arithmetic.
+      Missing references, malformed delays, non-positive attempts, and
+      aggregate overflow MUST fail before dispatch. rest_client_await keeps its
+      separate async timeout and MUST NOT inherit the submission aggregate.
+  - id: V38
+    rule: signal_source endpoints MUST declare a bounded source identity, declared discriminator and run-id selectors, a non-empty closed signal mapping, a non-empty payload mapping, a positive timeout, and statuses for accepted, refused_undeclared, source_validation, and machine_run_failed; refused_conflict defaults to HTTP 409.
+  - id: V39
+    rule: signal_source selectors MUST reference fields declared by endpoint.request and MUST NOT select signal, profile, machine, tools, tool declarations, model configuration, checkpoint, URL, method, host, or other caller program authority.
+  - id: V40
+    rule: signal_source sensitive entries MUST name payload mapping keys and become typed one-segment Result output-redaction paths before the injected host runner is called.
+  - id: V41
+    rule: signal_source validates and maps the complete request before invoking its injected SignalSource runner; unknown discriminators and invalid requests do not invoke the runner, enter emit_signal queues, or use machine_request.
 
 invalid_examples:
   ambiguous_resource_operation: |
@@ -1701,6 +1848,7 @@ implementation_status:
     - rest_await_event source-filter config through ToolDef config.
     - emit_signal lifecycle exit routes and exit_agent ToolDef config.
     - machine_request endpoint binding config.
+    - signal_source endpoint binding with trusted closed request mapping, typed sensitive paths, host-runner injection, configured outcome responses, bounded tracing, and no inbound queue.
     - filesystem resource words used by the Knowledge Manager request machine.
     - generic machine_request response trace fields for server, route, and request machine emitted directly by internal/tools/rest.
     - always-on Knowledge Manager conformance coverage for generic machine_request routes under plain go test.

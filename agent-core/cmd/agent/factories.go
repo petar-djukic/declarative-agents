@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/compose"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/control"
+	tooldolt "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/dolt"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/filesystem"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/lifecycle"
 	toollm "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/llm"
@@ -25,6 +27,7 @@ import (
 )
 
 func registerBuiltinFactories(br *toolregistry.BuiltinRegistry, st *agentState, selected map[string]bool) {
+	st.validationEnabled = validationFactoriesSelected(selected)
 	toolregistry.RegisterStandardBuiltinFactories(br, selected, standardFactoryDeps(st))
 }
 
@@ -56,10 +59,45 @@ func standardFactoryDeps(st *agentState) toolregistry.StandardFactoryDeps {
 		RegisterEvaluation:     registerEvaluationFactories(st),
 		RegisterSpecValidation: registerSpecValidationFactories(st),
 		RegisterREST:           registerRESTFactories(st),
+		RegisterDolt:           registerDoltFactories(st),
 		RegisterCompose:        registerComposeFactories(),
 		RegisterOTLP:           registerOTLPFactories(),
 		RegisterService:        registerServiceFactories(st),
 	}
+}
+
+func registerDoltFactories(st *agentState) toolregistry.FactoryRegistrar {
+	checkpoint, checkpointErr := doltCheckpointIdentity(st.doltDSN)
+	deps := tooldolt.FactoryDeps{
+		Connections:        environmentDoltConnections{},
+		CheckpointIdentity: checkpoint,
+	}
+	return func(br *toolregistry.BuiltinRegistry) {
+		register := func(init string, factory toolregistry.BuiltinFactory) {
+			br.Register(init, func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
+				if checkpointErr != nil {
+					return nil, checkpointErr
+				}
+				return factory(def, vars)
+			})
+		}
+		register(tooldolt.InitProvision, tooldolt.ProvisionFactory(deps))
+		register(tooldolt.InitQuery, tooldolt.QueryFactory(deps))
+		register(tooldolt.InitWrite, tooldolt.WriteFactory(deps))
+	}
+}
+
+type environmentDoltConnections struct{}
+
+func (environmentDoltConnections) ResolveConnection(
+	_ context.Context, ref string, _ map[string]string,
+) (string, error) {
+	//nolint:forbidigo // Trusted ToolDef config names the environment reference; DSN authority remains at cmd/agent.
+	value, ok := os.LookupEnv(ref)
+	if !ok || value == "" {
+		return "", fmt.Errorf("configured Dolt connection reference %q is unavailable", ref)
+	}
+	return value, nil
 }
 
 func registerComposeFactories() toolregistry.FactoryRegistrar {
@@ -105,16 +143,16 @@ func registerFilesystemFactories() toolregistry.FactoryRegistrar {
 	return func(br *toolregistry.BuiltinRegistry) {
 		fileFactories := []struct {
 			init    string
-			builder func(string, core.MetricConfig) core.Builder
+			builder func(string, core.MetricConfig, string) core.Builder
 		}{
-			{"file_read", func(root string, metrics core.MetricConfig) core.Builder {
+			{"file_read", func(root string, metrics core.MetricConfig, _ string) core.Builder {
 				return &filesystem.ReadBuilder{Root: root, Metrics: metrics}
 			}},
-			{"file_write", func(root string, metrics core.MetricConfig) core.Builder {
-				return &filesystem.WriteBuilder{Root: root, Metrics: metrics}
+			{"file_write", func(root string, metrics core.MetricConfig, strategy string) core.Builder {
+				return &filesystem.WriteBuilder{Root: root, UndoStrategy: strategy, Metrics: metrics}
 			}},
-			{"file_edit", func(root string, metrics core.MetricConfig) core.Builder {
-				return &filesystem.EditBuilder{Root: root, Metrics: metrics}
+			{"file_edit", func(root string, metrics core.MetricConfig, strategy string) core.Builder {
+				return &filesystem.EditBuilder{Root: root, UndoStrategy: strategy, Metrics: metrics}
 			}},
 		}
 		for _, entry := range fileFactories {
@@ -127,9 +165,9 @@ func registerFilesystemFactories() toolregistry.FactoryRegistrar {
 	}
 }
 
-func registerFileFactory(br *toolregistry.BuiltinRegistry, init string, builder func(string, core.MetricConfig) core.Builder) {
+func registerFileFactory(br *toolregistry.BuiltinRegistry, init string, builder func(string, core.MetricConfig, string) core.Builder) {
 	br.Register(init, func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-		return builder(vars["directory"], def.Metrics), nil
+		return builder(vars["directory"], def.Metrics, def.Undo.Strategy), nil
 	})
 }
 
@@ -156,104 +194,6 @@ func resourceConfig(def catalog.ToolDef) (filesystem.ResourceConfig, error) {
 		return filesystem.ResourceConfig{}, err
 	}
 	return cfg, nil
-}
-
-func registerLLMFactories(st *agentState) toolregistry.FactoryRegistrar {
-	return func(br *toolregistry.BuiltinRegistry) {
-		br.Register("invoke_llm", invokeLLMFactory(st))
-		br.Register("parse_response", parseResponseFactory(st))
-		br.Register("parse_structured", parseStructuredFactory())
-		br.Register("report_parse_error", reportParseErrorFactory(st))
-		br.Register("reset_history", resetHistoryFactory(st))
-		br.Register("nudge_reread", func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-			var cfg struct {
-				Text string `json:"nudge_text"`
-			}
-			if err := catalog.DecodeToolConfig(def, &cfg); err != nil {
-				return nil, err
-			}
-			if cfg.Text == "" {
-				return nil, fmt.Errorf("tool %q config nudge_text is required", def.Name)
-			}
-			return &control.NudgeRereadBuilder{Tracer: st.tracer, Text: cfg.Text}, nil
-		})
-		br.Register("done", func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-			return control.DoneBuilder{}, nil
-		})
-	}
-}
-
-func parseStructuredFactory() toolregistry.BuiltinFactory {
-	return func(def catalog.ToolDef, _ map[string]string) (core.Builder, error) {
-		var cfg catalog.ParseStructuredConfig
-		if err := catalog.DecodeToolConfig(def, &cfg); err != nil {
-			return nil, err
-		}
-		if err := catalog.ValidateParseStructuredConfig(def.Name, cfg); err != nil {
-			return nil, err
-		}
-		schema, err := toollm.CompileStructuredSchema(def.Name, cfg.Schema)
-		if err != nil {
-			return nil, err
-		}
-		return toollm.ParseStructuredBuilder{
-			ToolName: def.Name, Source: cfg.Source, Schema: schema,
-			Parsed: core.Signal(cfg.Parsed), Unparsed: core.Signal(cfg.Unparsed),
-		}, nil
-	}
-}
-
-func invokeLLMFactory(st *agentState) toolregistry.BuiltinFactory {
-	return func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-		// In an isolated (request-local) state each invoke_llm word gets its own
-		// conversation, so a router word's tool call does not pollute the answer
-		// word's history. The shared conversation stays the default so host agents
-		// keep reset_history and undo coherence across their looped invoke_llm word.
-		history := st.conversation
-		if st.isolateConversations {
-			history = llm.NewConversation(nil, "", llm.ChatOptions{})
-		}
-		return toollm.NewInvokeLLMBuilder(def, toollm.InvokeLLMFactoryDeps{
-			History:    history,
-			Registry:   st.registry,
-			Tracer:     st.tracer,
-			Verbose:    st.verbose,
-			Ctx:        st.ctx,
-			OnResolved: onModelResolved(st),
-		})
-	}
-}
-
-func onModelResolved(st *agentState) func(toollm.InvokeLLMResolvedConfig) {
-	return func(cfg toollm.InvokeLLMResolvedConfig) {
-		st.parser = cfg.Parser
-		st.model = cfg.Model
-		st.providerName = cfg.ProviderName
-		st.manifestState = cfg.ManifestState
-		st.maxDuration = cfg.MaxTime
-		st.maxTokens = cfg.MaxTokens
-	}
-}
-
-func parseResponseFactory(st *agentState) toolregistry.BuiltinFactory {
-	return func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-		return &toollm.ParseResponseBuilder{
-			Registry: st.registry,
-			Parser:   st.parser,
-			Tracer:   st.tracer,
-			StateFunc: func() core.State {
-				return st.manifestState
-			},
-			Verbose: st.verbose,
-			Retry:   st.parseRetries,
-		}, nil
-	}
-}
-
-func resetHistoryFactory(st *agentState) toolregistry.BuiltinFactory {
-	return func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
-		return &toollm.ResetHistoryBuilder{History: st.conversation, Tracer: st.tracer}, nil
-	}
 }
 
 func registerLifecycleFactories(st *agentState) toolregistry.FactoryRegistrar {
@@ -284,6 +224,7 @@ func checkpointRollbackFactory(st *agentState) toolregistry.BuiltinFactory {
 		}
 		reverter, _ := st.checkpointForOps().(core.CheckpointReverter)
 		return &lifecycle.CheckpointRollbackBuilder{
+			ToolName:   def.Name,
 			Config:     cfg,
 			Checkpoint: reverter,
 			Registry:   st.registry,
@@ -390,12 +331,14 @@ func selfInvokeFactory(st *agentState) toolregistry.BuiltinFactory {
 		config := childExecuteConfig(parsed, st.coreRoot)
 		config.Binary = st.childAgentBinary
 		return &control.SelfInvokeBuilder{
-			Config:      config,
-			RequestFrom: parsed.RequestFrom,
-			OutputFrom:  parsed.OutputFrom,
-			ExtraArgs:   directoryArgs(vars["directory"]),
-			Ctx:         st.ctx,
-			Tracer:      st.tracer,
+			ToolName:      def.Name,
+			Config:        config,
+			RequestFrom:   parsed.RequestFrom,
+			OutputFrom:    parsed.OutputFrom,
+			WorkspacePath: vars["directory"],
+			ExtraArgs:     directoryArgs(vars["directory"]),
+			Ctx:           st.ctx,
+			Tracer:        st.tracer,
 		}, nil
 	}
 }
@@ -420,8 +363,41 @@ func directoryArgs(directory string) []string {
 
 func registerSpecValidationFactories(st *agentState) toolregistry.FactoryRegistrar {
 	return func(br *toolregistry.BuiltinRegistry) {
-		validation.RegisterSpecFactories(br, st.directory)
+		state := st.validation
+		if state == nil {
+			state = &validation.SpecState{
+				Directory:       st.directory,
+				TargetDirectory: st.directory,
+			}
+			if st.validationEnabled {
+				st.validation = state
+			}
+		}
+		provider, resolver := validationReferencePorts(st)
+		validation.RegisterSpecFactories(br, validation.FactoryDeps{
+			Directory: st.directory, State: state,
+			ReferenceProvider: provider, SnapshotResolver: resolver,
+		})
 	}
+}
+
+func validationFactoriesSelected(selected map[string]bool) bool {
+	for _, name := range []string{
+		"load_corpus",
+		"load_test_claims",
+		"validate_specs",
+		"reduce_consistency_checks",
+		"reduce_ref_checks",
+		"reduce_grep_checks",
+		"resolve_test_evidence",
+		"reduce_test_evidence_run",
+		"format_report",
+	} {
+		if selected[name] {
+			return true
+		}
+	}
+	return false
 }
 
 func registerPlanningFactories(st *agentState) toolregistry.FactoryRegistrar {
@@ -455,6 +431,7 @@ func registerRESTFactories(st *agentState) toolregistry.FactoryRegistrar {
 		toolrest.RegisterFactories(br, toolrest.FactoryDeps{
 			Definitions:        st.restDefs,
 			MachineRunner:      profileMachineRequestRunner(st),
+			SignalSourceRunner: st.signalSourceRunner,
 			Monitor:            st.monitor,
 			RunID:              st.runID,
 			CredentialResolver: toolrest.EnvironmentCredentials{},
@@ -478,7 +455,7 @@ func profileMachineRequestRunner(st *agentState) toolrest.MachineRequestRunner {
 }
 
 // requestLocalState returns a per-request agentState for machine_request tool
-// factories. It shares the host's immutable deps (tracer, verbose, ctx,
+// factories. It shares the host's immutable deps (tracer, capture level, ctx,
 // directories) but binds tool construction to the request's own registry and a
 // fresh conversation and parse-retry and manifest-state tracker, so
 // parse_response and $tool resolve the tool vocabulary against the request
@@ -490,6 +467,7 @@ func requestLocalState(host *agentState, reg *core.Registry) *agentState {
 	local.conversation = llm.NewConversation(nil, "", llm.ChatOptions{})
 	local.isolateConversations = true
 	local.manifestState = ""
+	local.validation = nil
 	maxConsecutive := 0
 	if host.parseRetries != nil {
 		maxConsecutive = host.parseRetries.MaxConsecutive

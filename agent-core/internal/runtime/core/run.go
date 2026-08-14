@@ -6,9 +6,15 @@ import (
 	"encoding/json"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/monitor"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
 )
+
+// AttrRequestID is the repository-owned request identity attribute. OpenTelemetry
+// defines no general semantic convention for an application request identifier.
+const AttrRequestID attribute.Key = "declarative_agents.request.id"
 
 // RunStatus describes the outcome of a completed run.
 type RunStatus string
@@ -82,6 +88,10 @@ type LoopHooks struct {
 	TaskCompletedSignal  Signal
 	SnapshotConversation func() (json.RawMessage, error)
 	SnapshotDomain       func() (json.RawMessage, error)
+	// RestoreSnapshot rehydrates domain-owned state after request-signal resume
+	// has loaded and validated a checkpoint, before the resumed loop dispatches.
+	// Ordinary run/resume callers keep their existing explicit restore path.
+	RestoreSnapshot func(AgentSnapshot) error
 }
 
 // LoopParams bundles all inputs for Loop.
@@ -89,7 +99,11 @@ type LoopParams struct {
 	InitialState  State
 	InitialSignal Signal
 	InitialResult Result
-	InitialRun    RunResult
+	// PreserveInitialResultOutput keeps an explicitly empty initial output
+	// empty. Signal admission uses it after fail-closed payload redaction;
+	// existing model and resume callers retain the historical "Resume." default.
+	PreserveInitialResultOutput bool
+	InitialRun                  RunResult
 	// InitialExecution seeds the loop's Execution log so a resumed run continues
 	// appending to the persisted history instead of starting a fresh log (srd035).
 	InitialExecution Execution
@@ -107,12 +121,18 @@ type LoopParams struct {
 	Hooks           LoopHooks
 	// RunID identifies one logical run across checkpoint, monitor, and trace
 	// records. It remains stable when that run is resumed.
-	RunID        string
-	AgentName    string
-	AgentVersion string
-	ProviderName string
-	MachineFile  string
-	MachineSpec  *MachineSpec
+	RunID string
+	// RequestID identifies the request that owns a request-scoped run. It is
+	// empty for ordinary run-scoped agents.
+	RequestID string
+	// ConversationID groups all spans belonging to one conversation. When empty,
+	// the loop uses RunID so ordinary and resumed runs retain stable identity.
+	ConversationID string
+	AgentName      string
+	AgentVersion   string
+	ProviderName   string
+	MachineFile    string
+	MachineSpec    *MachineSpec
 	// Program identifies the immutable declarative profile whose tools the run
 	// registered. It is persisted for cross-process receipt rollback.
 	Program    ProgramRef

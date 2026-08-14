@@ -106,16 +106,22 @@ var _ core.ContextCommand = (*clientCmd)(nil)
 
 func (c restCompensationCmd) Name() string { return c.toolName }
 
+var _ core.ContextUndoCommand = restCompensationCmd{}
+
 func (c restCompensationCmd) Execute() core.Result {
 	return restCompensationError(c.toolName, "compensation_execute", fmt.Errorf("REST compensation commands are undo-only"))
 }
 
 func (c restCompensationCmd) Undo(prior core.Result) core.Result {
+	return c.UndoContext(context.Background(), prior)
+}
+
+func (c restCompensationCmd) UndoContext(ctx context.Context, prior core.Result) core.Result {
 	commandName := prior.CommandName
 	if commandName == "" {
 		commandName = c.toolName
 	}
-	return c.executor.CompensateFromReceipt(context.Background(), commandName, prior.Receipt)
+	return c.executor.CompensateFromReceipt(ctx, commandName, prior.Receipt)
 }
 
 func (c *clientCmd) Execute() core.Result {
@@ -221,7 +227,7 @@ func (c *clientCmd) restIdempotencyToken() string {
 // CompensateFromReceipt executes the REST compensation described by an opaque
 // receipt captured in Result.Receipt during Execute. This is the receipt-driven
 // entry point used by the reverse receipt walk (srd035-checkpoint-port R3; #44 R3).
-func (e CompensationExecutor) CompensateFromReceipt(_ context.Context, commandName, receipt string) core.Result {
+func (e CompensationExecutor) CompensateFromReceipt(ctx context.Context, commandName, receipt string) core.Result {
 	compensation, ok, err := undo.DecodeBoundaryReceipt(receipt)
 	if err != nil {
 		return restCompensationError(commandName, "compensation_decode", err)
@@ -229,10 +235,14 @@ func (e CompensationExecutor) CompensateFromReceipt(_ context.Context, commandNa
 	if !ok {
 		return core.NoopUndo(commandName)
 	}
-	return e.runCompensation(commandName, compensation)
+	return e.runCompensation(ctx, commandName, compensation)
 }
 
-func (e CompensationExecutor) runCompensation(commandName string, compensation undo.BoundaryCompensation) core.Result {
+func (e CompensationExecutor) runCompensation(
+	ctx context.Context,
+	commandName string,
+	compensation undo.BoundaryCompensation,
+) core.Result {
 	operation, err := e.resolveCompensationOperation(compensation)
 	if err != nil {
 		return restCompensationError(commandName, "compensation_lookup", err)
@@ -243,7 +253,11 @@ func (e CompensationExecutor) runCompensation(commandName string, compensation u
 		Operation:   operation,
 		Credentials: e.Credentials,
 	}.Build(core.Result{Output: jsonOutput(compensationRuntimeParams(compensation, operation.Operation.Params))})
-	result := cmd.Execute()
+	contextual, ok := cmd.(core.ContextCommand)
+	if !ok {
+		return restCompensationError(commandName, "compensation_execute", errors.New("REST compensation command is not context-aware"))
+	}
+	result := contextual.ExecuteContext(ctx)
 	if result.Signal == core.CommandError {
 		return result
 	}

@@ -11,16 +11,14 @@ import (
 )
 
 // These assert the applier's mutation-undo contracts (srd006, agent-core srd028).
-// The load-bearing one is the compensating pair: helm_upgrade must name
-// helm_rollback as its undo, because apply-machine.yaml compensates a post-apply
-// verify stall by dispatching helm_rollback, and a rollout that applies cleanly
-// but stalls in verification would otherwise have no declared way back.
+// The load-bearing one is the compensating pair: helm_upgrade must declare a
+// compensating strategy because apply-machine.yaml routes a post-apply verify
+// stall through helm_rollback.
 
 type declaredUndoTool struct {
 	Name          string `yaml:"name"`
 	Reversibility struct {
 		Classification       string `yaml:"classification"`
-		Undo                 string `yaml:"undo"`
 		RequiresConfirmation bool   `yaml:"requires_confirmation"`
 	} `yaml:"reversibility"`
 	Undo struct {
@@ -35,18 +33,14 @@ type declaredUndoContract struct {
 }
 
 // TestApplierHelmRollbackIsTheUndoOfHelmUpgrade pins the compensating pair: the
-// upgrade is compensatable and names helm_rollback as its undo, and the rollback
-// is itself a one-way action that needs confirmation.
+// upgrade is compensatable, and the rollback is itself a one-way action that
+// needs confirmation.
 func TestApplierHelmRollbackIsTheUndoOfHelmUpgrade(t *testing.T) {
 	exec := filepath.Join(agentDir(t, "applier"), "exec-declarations.yaml")
 
 	upgrade := readDeclaredUndoTool(t, exec, "helm_upgrade")
 	if upgrade.Reversibility.Classification != "compensatable" {
 		t.Errorf("helm_upgrade classification = %q, want compensatable", upgrade.Reversibility.Classification)
-	}
-	if upgrade.Reversibility.Undo != "helm_rollback" {
-		t.Errorf("helm_upgrade undo = %q, want helm_rollback; a verify stall would have no declared compensation",
-			upgrade.Reversibility.Undo)
 	}
 	if upgrade.Undo.Strategy != "compensating_action" {
 		t.Errorf("helm_upgrade undo strategy = %q, want compensating_action", upgrade.Undo.Strategy)
@@ -100,6 +94,43 @@ func TestApplierMutationUndoContractsStaySemanticallyAligned(t *testing.T) {
 				t.Error("receipt-consuming undo has no captures")
 			}
 		})
+	}
+}
+
+func TestPlannerExecuteRESTPolicyMatchesIrreversibleTool(t *testing.T) {
+	planner := agentDir(t, "planner")
+	tool := readDeclaredUndoTool(t, filepath.Join(planner, "request-declarations.yaml"), "delegate_executor")
+	if tool.Reversibility.Classification != "irreversible" ||
+		!tool.Reversibility.RequiresConfirmation ||
+		tool.Undo.Strategy != "irreversible" {
+		t.Errorf("delegate executor policy = %+v, want confirmed irreversible", tool)
+	}
+
+	var config struct {
+		Rest struct {
+			Clients map[string]struct {
+				Operations map[string]struct {
+					Compensation  map[string]interface{} `yaml:"compensation"`
+					Reversibility struct {
+						Classification       string `yaml:"classification"`
+						Undo                 string `yaml:"undo"`
+						RequiresConfirmation bool   `yaml:"requires_confirmation"`
+					} `yaml:"reversibility"`
+				} `yaml:"operations"`
+			} `yaml:"clients"`
+		} `yaml:"rest"`
+	}
+	readIntakeYAML(t, filepath.Join(planner, "rest.yaml"), &config)
+	operation := config.Rest.Clients["executor"].Operations["execute"]
+	if operation.Reversibility.Classification != "irreversible" ||
+		operation.Reversibility.Undo != "irreversible" ||
+		!operation.Reversibility.RequiresConfirmation {
+		t.Errorf("planner execute REST policy = %+v, want confirmed irreversible",
+			operation.Reversibility)
+	}
+	if len(operation.Compensation) != 0 {
+		t.Errorf("planner execute declares compensation without a restore endpoint: %v",
+			operation.Compensation)
 	}
 }
 

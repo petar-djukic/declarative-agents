@@ -40,6 +40,7 @@ type FactoryDeps struct {
 	ServerState        *ServerState
 	AsyncState         *AsyncState
 	MachineRunner      MachineRequestRunner
+	SignalSourceRunner SignalSourceRunner
 	Monitor            MonitorState
 	RunID              string
 	CredentialResolver CredentialResolver
@@ -97,6 +98,9 @@ func (r *ProfileMachineRequestRunner) prepareConfig(cfg MachineRequest) (Machine
 	if err != nil {
 		return MachineRequest{}, fmt.Errorf("machine_config_invalid: load request machine: %w", err)
 	}
+	if err := core.ValidateRequiredMachinePolicy(machine); err != nil {
+		return MachineRequest{}, fmt.Errorf("machine_config_invalid: request machine policy: %w", err)
+	}
 	if err := validateMachineResponses(machine, cfg.Response); err != nil {
 		return MachineRequest{}, err
 	}
@@ -113,7 +117,8 @@ func (r *ProfileMachineRequestRunner) prepareConfig(cfg MachineRequest) (Machine
 	cfg.ToolAction = toolregistry.BuildDynamicToolAction(toolregistry.DynamicToolActionDeps{
 		Registry: reg,
 	})
-	cfg.Budget = machine.BudgetSpec.ToBudget(core.Budget{MaxIterations: 10})
+	cfg.Budget = machine.BudgetSpec.ToBudget(core.Budget{})
+	cfg.CommandTimeout = machine.BudgetSpec.CommandTimeout
 	return cfg, nil
 }
 
@@ -391,6 +396,9 @@ func newClientBuilder(def catalog.ToolDef, init string, deps FactoryDeps) (core.
 	if init == InitClientSend && operation.Operation.Async == nil {
 		return nil, fmt.Errorf("tool %q requires async REST operation", def.Name)
 	}
+	if err := validateClientRollbackPolicy(def, init, operation); err != nil {
+		return nil, err
+	}
 	if err := validateClientEmits(def, init, operation); err != nil {
 		return nil, err
 	}
@@ -398,6 +406,30 @@ func newClientBuilder(def catalog.ToolDef, init string, deps FactoryDeps) (core.
 		ToolName: def.Name, Init: init, Operation: operation, Definitions: deps.Definitions,
 		AsyncState: deps.AsyncState, Credentials: deps.CredentialResolver, Metrics: def.Metrics,
 	}, nil
+}
+
+func validateClientRollbackPolicy(
+	def catalog.ToolDef,
+	init string,
+	operation ClientOperationDefinition,
+) error {
+	toolExpectsReceipt := def.Reversibility.Classification == "compensatable"
+	operationProducesReceipt := init != InitClientAwait &&
+		operation.Operation.Reversibility.Classification == "compensatable" &&
+		len(operation.Operation.Compensation) > 0
+	if toolExpectsReceipt == operationProducesReceipt {
+		return nil
+	}
+	if toolExpectsReceipt {
+		return fmt.Errorf(
+			"tool %q is compensatable but REST operation %q cannot produce a rollback receipt",
+			def.Name, operation.OperationName,
+		)
+	}
+	return fmt.Errorf(
+		"tool %q rollback policy %q disagrees with receipt-producing REST operation %q",
+		def.Name, def.Reversibility.Classification, operation.OperationName,
+	)
 }
 
 func newServerBuilder(def catalog.ToolDef, init string, deps FactoryDeps) (core.Builder, error) {
@@ -413,6 +445,7 @@ func newServerBuilder(def catalog.ToolDef, init string, deps FactoryDeps) (core.
 		return nil, err
 	}
 	server.MachineRequestRunner = deps.MachineRunner
+	server.SignalSourceRunner = deps.SignalSourceRunner
 	server.Monitor = deps.Monitor
 	server.RunID = deps.RunID
 	server.Credentials = deps.CredentialResolver

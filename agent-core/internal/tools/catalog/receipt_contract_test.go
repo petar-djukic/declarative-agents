@@ -15,7 +15,8 @@ func reversibleWriteDef() ToolDef {
 	return ToolDef{
 		Name:          "write",
 		Type:          "builtin",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "workspace_restore"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "workspace_restore"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "filesystem_write"}}},
 	}
 }
@@ -55,7 +56,8 @@ func TestValidateReceiptPresenceIgnoresReadOnlyReversibleTool(t *testing.T) {
 
 	def := ToolDef{
 		Name:          "find",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "filesystem_read"}}},
 	}
 
@@ -95,7 +97,8 @@ func TestValidateReceiptContractFailsMutatingReversibleWithNoopUndo(t *testing.T
 
 	def := ToolDef{
 		Name:          "write",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "filesystem_write"}}},
 	}
 
@@ -112,7 +115,8 @@ func TestValidateReceiptContractIgnoresReadOnlyReversibleTool(t *testing.T) {
 
 	def := ToolDef{
 		Name:          "find",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "filesystem_read"}}},
 	}
 
@@ -130,7 +134,8 @@ func TestValidateReceiptContractIgnoresReadOnlyStateThroughMutatingKind(t *testi
 	for _, kind := range []string{"external_api", "child_process"} {
 		def := ToolDef{
 			Name:          "read_" + kind,
-			Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+			Reversibility: ToolReversibility{Classification: "reversible"},
+			Undo:          ToolUndoContract{Strategy: "noop"},
 			SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: kind, State: "read_only"}}},
 		}
 
@@ -147,7 +152,8 @@ func TestValidateReceiptContractIgnoresProcessLocalListenerShutdown(t *testing.T
 	// restart, so a reversible server-lifecycle word producing it needs no receipt.
 	def := ToolDef{
 		Name:          "stop_server",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "network_listener_shutdown", State: "listener_stopped"}}},
 	}
 
@@ -162,7 +168,8 @@ func TestValidateReceiptContractFailsMutatingStateThroughSameKind(t *testing.T) 
 	// The same kind without a read_only state is still a mutation needing a receipt.
 	def := ToolDef{
 		Name:          "write_external",
-		Reversibility: ToolReversibility{Classification: "reversible", Undo: "noop"},
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
 		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "external_api", State: "records_added"}}},
 	}
 
@@ -189,4 +196,92 @@ func TestValidateReceiptContractsAggregatesSelectedTools(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rest_set_issue")
 	assert.Contains(t, err.Error(), "no receipt-consuming undo")
+}
+
+type receiptGuardBuilder struct {
+	name       string
+	returnsNil bool
+}
+
+func (b receiptGuardBuilder) Build(core.Result) core.Command {
+	return receiptGuardCommand{name: b.name}
+}
+
+func (b receiptGuardBuilder) BuildReverser() core.Command {
+	if b.returnsNil {
+		return nil
+	}
+	return receiptGuardCommand{name: b.name}
+}
+
+type receiptGuardCommand struct{ name string }
+
+func (c receiptGuardCommand) Name() string                 { return c.name }
+func (c receiptGuardCommand) Execute() core.Result         { return core.Result{Signal: core.ToolDone} }
+func (c receiptGuardCommand) Undo(core.Result) core.Result { return core.Result{Signal: core.ToolDone} }
+
+type receiptGuardNonReverser struct{ name string }
+
+func (b receiptGuardNonReverser) Build(core.Result) core.Command {
+	return receiptGuardCommand(b)
+}
+
+func TestValidateReceiptFamiliesGuardsSelectedMutatorPlumbing(t *testing.T) {
+	t.Parallel()
+
+	good := reversibleWriteDef()
+	good.Name = "persist_alias"
+	noBuilder := reversibleWriteDef()
+	noBuilder.Name = "missing_alias"
+	noReverser := reversibleWriteDef()
+	noReverser.Name = "plain_alias"
+	nilReverser := reversibleWriteDef()
+	nilReverser.Name = "nil_alias"
+	wrongAlias := reversibleWriteDef()
+	wrongAlias.Name = "declared_alias"
+
+	registry := core.NewRegistry()
+	registry.Register(good.ToToolSpec(), receiptGuardBuilder{name: good.Name})
+	registry.Register(noReverser.ToToolSpec(), receiptGuardNonReverser{name: noReverser.Name})
+	registry.Register(nilReverser.ToToolSpec(), receiptGuardBuilder{name: nilReverser.Name, returnsNil: true})
+	registry.Register(wrongAlias.ToToolSpec(), receiptGuardBuilder{name: "init_name"})
+
+	err := ValidateReceiptFamilies([]ReceiptFamily{{
+		Name: "representative",
+		Definitions: []ToolDef{
+			good, noBuilder, noReverser, nilReverser, wrongAlias,
+		},
+	}}, registry)
+
+	require.Error(t, err)
+	for _, want := range []string{
+		`family "representative" declaration "missing_alias": no builder registered`,
+		`family "representative" declaration "plain_alias": builder does not implement Reverser`,
+		`family "representative" declaration "nil_alias": BuildReverser returned nil`,
+		`family "representative" declaration "declared_alias": fresh reverser name "init_name" does not preserve declaration alias`,
+	} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.NotContains(t, err.Error(), good.Name)
+}
+
+func TestValidateReceiptFamiliesAllowsReceiptlessNoopAndIrreversible(t *testing.T) {
+	t.Parallel()
+
+	noop := ToolDef{
+		Name:          "observe",
+		Reversibility: ToolReversibility{Classification: "reversible"},
+		Undo:          ToolUndoContract{Strategy: "noop"},
+		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "state_read"}}},
+	}
+	irreversible := ToolDef{
+		Name:          "publish",
+		Reversibility: ToolReversibility{Classification: "irreversible"},
+		Undo:          ToolUndoContract{Strategy: "irreversible"},
+		SideEffects:   ToolSideEffects{Items: []ToolSideEffect{{Kind: "external_api", State: "published"}}},
+	}
+
+	require.NoError(t, ValidateReceiptFamilies([]ReceiptFamily{{
+		Name: "controls", Definitions: []ToolDef{noop, irreversible},
+	}}, nil))
 }

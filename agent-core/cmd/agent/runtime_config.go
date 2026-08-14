@@ -16,7 +16,9 @@ import (
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/monitor"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
+	tooldolt "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/dolt"
 	toolexec "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/exec"
+	toollm "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/llm"
 	toolregistry "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/registry"
 	toolrest "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest"
 )
@@ -38,7 +40,7 @@ type runtimeConfig struct {
 	OTelMetricOTLP   string
 	OTelService      string
 	OTelParent       string
-	VerboseTrace     bool
+	TelemetryCapture toollm.CaptureLevel
 	DoltDSN          string
 	ResumeCheckpoint string
 	ResumeSignal     string
@@ -61,6 +63,14 @@ var openDoltCheckpoint = func(dsn, runID string, terminal func(core.State) bool)
 }
 
 func loadRuntimeConfig() (runtimeConfig, error) {
+	captureLevel, err := resolveTelemetryCapture(
+		flagTelemetryCapture,
+		telemetryCaptureSet(),
+		flagVerboseTrace,
+	)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	if flagProfile == "" {
 		return runtimeConfig{}, fmt.Errorf("--profile is required")
 	}
@@ -68,6 +78,10 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, fmt.Errorf("load profile: %w", err)
 	}
+	return runtimeConfigFromProfile(p, captureLevel), nil
+}
+
+func runtimeConfigFromProfile(p catalog.AgentProfile, captureLevel toollm.CaptureLevel) runtimeConfig {
 	directory := flagDirectory
 	if directory == "" {
 		directory = p.Directory
@@ -89,12 +103,29 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		OTelMetricOTLP:   flagOTelMetricOTLP,
 		OTelService:      flagOTelService,
 		OTelParent:       flagOTelParent,
-		VerboseTrace:     flagVerboseTrace,
+		TelemetryCapture: captureLevel,
 		DoltDSN:          flagDoltDSN,
 		ResumeCheckpoint: flagResumeCheckpoint,
 		ResumeSignal:     flagResumeSignal,
 		ChildAgentBinary: flagChildAgent,
-	}, nil
+	}
+}
+
+func resolveTelemetryCapture(value string, explicitlySet, verboseTrace bool) (toollm.CaptureLevel, error) {
+	level, err := toollm.ParseCaptureLevel(value)
+	if err != nil {
+		return "", fmt.Errorf("parse --telemetry-capture: %w", err)
+	}
+	if !verboseTrace {
+		return level, nil
+	}
+	if explicitlySet && level != toollm.CaptureFull {
+		return "", fmt.Errorf(
+			"--verbose-trace conflicts with --telemetry-capture=%s; use --telemetry-capture=full or omit one flag",
+			level,
+		)
+	}
+	return toollm.CaptureFull, nil
 }
 
 func loadProfileToolDefs(cfg runtimeConfig) ([]catalog.ToolDef, error) {
@@ -136,6 +167,17 @@ func resolveCheckpoint(cfg runtimeConfig, machine core.MachineSpec, runID string
 		close:      cp.Close,
 		label:      "loop checkpoint",
 	}, nil
+}
+
+func doltCheckpointIdentity(dsn string) (*tooldolt.DatabaseIdentity, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, nil
+	}
+	identity, err := tooldolt.IdentityFromDSN(dsn, "")
+	if err != nil {
+		return nil, fmt.Errorf("resolve active Dolt checkpoint identity: %w", err)
+	}
+	return &identity, nil
 }
 
 // resolveRunID returns the stable identity shared by checkpoint, monitor, and
