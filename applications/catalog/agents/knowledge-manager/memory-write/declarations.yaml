@@ -44,7 +44,6 @@ tools:
         state: read_only
     reversibility:
       classification: reversible
-      undo: noop
     undo:
       strategy: noop
       description: Computing an embedding does not mutate state.
@@ -108,7 +107,6 @@ tools:
           the call leaves no net change to reverse.
     reversibility:
       classification: reversible
-      undo: noop
     undo:
       strategy: noop
       description: Create-or-get is idempotent for a stable collection name.
@@ -173,7 +171,6 @@ tools:
         state: records_added
     reversibility:
       classification: compensatable
-      undo: delete_records
     undo:
       strategy: compensating_action
       description: Delete the receipt-recorded record id from the blackboard collection.

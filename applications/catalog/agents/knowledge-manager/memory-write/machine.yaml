@@ -26,7 +26,9 @@ invariants:
   - The terminal Result carries the record id, never the stored content.
   - The Chroma and Ollama servers are external preconditions, checked by the caller, not started by this profile.
 initial_state: Idle
+summary_signal: MemoryAdded
 budget:
+  command_timeout: 3m
   max_iterations: 8
 states:
   - name: Idle
@@ -39,8 +41,10 @@ states:
     meaning: The tagged record is being written to the resolved collection.
   - name: Succeeded
     meaning: Terminal. The entry was stored and its record id is the run output.
+    run_status: succeeded
   - name: Failed
     meaning: Terminal. An embedding or Chroma boundary word failed.
+    run_status: failed
 terminal_states:
   - Succeeded
   - Failed
