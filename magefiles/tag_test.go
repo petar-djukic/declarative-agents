@@ -490,9 +490,6 @@ func TestReleaseGatesMatchDocumentedContract(t *testing.T) {
 		{name: "applications/agent-architecture integration", dir: "/release/applications/agent-architecture",
 			args: []string{"mage", "integration:all"}, lane: "applications/agent-architecture",
 			resources: []releaseResourceClass{releaseResourceDocker}},
-		{name: "applications/prose-editor integration", dir: "/release/applications/prose-editor",
-			args: []string{"mage", "integration:all"}, lane: "applications/prose-editor",
-			resources: []releaseResourceClass{releaseResourceDocker}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("release gates = %#v, want %#v", got, want)
