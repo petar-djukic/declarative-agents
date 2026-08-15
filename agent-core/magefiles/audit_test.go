@@ -1,4 +1,5 @@
-// Copyright (c) 2026 Nokia. All rights reserved.
+// Copyright (c) 2026 Nokia
+// SPDX-License-Identifier: BSD-3-Clause
 
 package main
 
@@ -19,5 +20,11 @@ func TestFormalEvidenceSerializesGoPackages(t *testing.T) {
 	}
 	if got := strings.Count(string(data), "args: [test, -p=1,"); got != 2 {
 		t.Fatalf("serialized go-test commands = %d, want 2", got)
+	}
+	if got := strings.Count(
+		string(data),
+		"args: [test, -p=1, -json, -count=1, ./...]",
+	); got != 1 {
+		t.Fatalf("full go-test evidence runs = %d, want one shared run", got)
 	}
 }

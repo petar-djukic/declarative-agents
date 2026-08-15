@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 schema_version: prose-editor.embedding-fixture/v1
 model: tracer-embedding
 vector: [0.125, 0.25, 0.5]

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 # Prose Editor audit and tracer-closure configuration.
 #
 # Prose Editor remains outside the root runnable registry. This file declares

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 id: srd002-writing-saga-workproducts
 title: Writing Saga and Workproduct Lifecycle
 status: specified

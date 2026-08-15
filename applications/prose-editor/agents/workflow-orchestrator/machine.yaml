@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 name: prose-workflow-orchestrator
 purpose: |-
   Coordinate the Release 00.1 tracer: capture one source, preserve its original

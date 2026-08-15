@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 schema_version: prose-editor.tracer-scenarios/v1
 source:
   repository: example.com/acme/docs

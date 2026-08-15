@@ -1,4 +1,5 @@
-// Copyright (c) 2026 Nokia. All rights reserved.
+// Copyright (c) 2026 Nokia
+// SPDX-License-Identifier: BSD-3-Clause
 
 // prose-editor-tracer-boundary is the deterministic Release 00.1 boundary.
 // The shipped agent machines own sequencing; this process only records and
