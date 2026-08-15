@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 id: test-rel17.0-blackboard-memory
 title: Test Suite for Release 17.0 Blackboard Memory Corpus Extensions
 release: "17.0"

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 schema_version: prose-editor.critic-response/v1
 outcome: completed
 verdict: pass

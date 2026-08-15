@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nokia
+# SPDX-License-Identifier: BSD-3-Clause
 id: rel17.0-uc001-blackboard-memory
 title: Tagged Write and Filtered Read on a Per-Task Blackboard
 
