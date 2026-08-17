@@ -63,7 +63,6 @@ role_groups:
       - documentation-curator
       - corpus-ingest
       - corpus-reader
-      - memory-write
     summary: |
       Knowledge work curates documentation and maintains a reusable retrieval
       corpus. Corpus profiles compute provider embeddings and sequence explicit
@@ -135,13 +134,6 @@ dependency_directions:
     meaning: Corpus reader threads a provider vector into Chroma query and gives
       the retrieved identities and chunks to the answer model.
     evidence: rel08.0-uc002-corpus-query
-  - from: memory-write
-    to: provider embedding and Chroma
-    kind: tagged_memory_write
-    meaning: Memory write embeds a requested entry, create-or-gets the named
-      blackboard collection, stores the record with its provenance, and returns
-      the record id without echoing the stored content.
-    evidence: rel17.0-uc001-blackboard-memory
   - from: scenario-critic
     to: mock, subject, and validator profiles
     kind: scenario_composition
@@ -265,13 +257,6 @@ actor_boundaries:
       - answer model
     boundary: The profile computes a query embedding, retrieves identified
       chunks, and constrains the model answer to those chunks.
-  - profile: memory-write
-    actors:
-      - requesting agent
-      - embedding provider
-      - Chroma
-    boundary: The profile takes one entry as request input, embeds it, stores it
-      in the named collection with its provenance, and returns a record id.
   - profile: scenario-critic
     actors:
       - scenario author

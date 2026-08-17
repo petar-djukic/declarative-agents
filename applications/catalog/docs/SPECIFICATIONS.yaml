@@ -190,18 +190,6 @@ roadmap_summary:
       (release 13.0), and the Explore UI page renders a duration heatmap,
       drag-selects a region, shows the ranked attribute divergence, and links
       exemplar spans into the per-trace waterfall.
-  - version: "17.0"
-    name: Blackboard memory corpus extensions
-    status: implemented
-    scope: |
-      Extend the Chroma corpus family so one collection serves as shared
-      short-term memory: the collection name becomes a declared parameter,
-      writes carry source, agent, and round provenance, queries accept a
-      metadata filter, an exact $contains document filter, and a declared result
-      count, and a memory-write block writes one entry and returns its record id
-      without echoing the content. The extensions are additive operations and one
-      block, so the release 08.0 ingest and reader paths send the request bodies
-      they sent before.
   - version: "99.0"
     name: Observer family promotion
     status: planned
@@ -400,14 +388,6 @@ srd_index:
       endpoints, charts, rollout commands, and authority remain local.
     status: implemented
     path: docs/specs/software-requirements/srd022-applier.yaml
-  - id: srd023-blackboard-memory
-    title: Blackboard Memory Corpus Extensions
-    summary: Parameterized collection identity, provenance metadata on writes,
-      metadata and exact-substring query filters with a declared result count,
-      the memory-write block, and the compatibility contract that keeps the
-      release 08.0 ingest and reader paths unchanged.
-    status: implemented
-    path: docs/specs/software-requirements/srd023-blackboard-memory.yaml
 
 config_format_index: []
 
@@ -643,13 +623,6 @@ use_case_index:
       thin application wrappers that retain local deployment authority.
     status: implemented
     path: docs/specs/use-cases/rel16.0-uc001-applier-family.yaml
-  - id: rel17.0-uc001-blackboard-memory
-    title: Tagged Write and Filtered Read on a Per-Task Blackboard
-    summary: An agent writes a provenance-tagged entry into a named collection
-      through the memory-write block and a reader retrieves it by metadata and by
-      exact substring, while the release 08.0 paths run unchanged.
-    status: implemented
-    path: docs/specs/use-cases/rel17.0-uc001-blackboard-memory.yaml
   - id: rel99.0-uc001-observer-family
     title: The observer is a catalog-owned family adopted across applications
     summary: The fleet observer becomes a catalog-owned family generalized from
@@ -797,13 +770,6 @@ test_suite_index:
       statistics evidence for the promoted applier family.
     status: implemented
     path: docs/specs/test-suites/test-rel16.0-applier.yaml
-  - id: test-rel17.0-blackboard-memory
-    title: Test Suite for Release 17.0 Blackboard Memory Corpus Extensions
-    summary: Declaration, fixture-backed roundtrip, collection-isolation,
-      compatibility, and live integration cases for the corpus extensions and the
-      memory-write block.
-    status: implemented
-    path: docs/specs/test-suites/test-rel17.0-blackboard-memory.yaml
   - id: test-rel99.0-observer
     title: Test Suite for Release 99.0 Observer Family Promotion
     summary: Specification-graph cases for the generalized observer-family SRD,
