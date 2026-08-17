@@ -202,9 +202,9 @@ local audit target, and root audit-only registration exist.
 - `catalog/`: reusable catalog module, not a runnable application.
 
 Prose Editor moved downstream to
-[`petar-djukic/prose-editor`](https://github.com/petar-djukic/prose-editor),
-a standalone private repository that adopted the module with its history at
-GH-43. It is no longer built, tested, counted, or released by this repository.
+[`petar-djukic/declarative-agents`](https://github.com/petar-djukic/declarative-agents),
+which adopted the module at upstream commit `9cb87d97` (GH-1578). It is no
+longer built, tested, counted, or released by this repository.
 
 Root Mage orchestration is the source of truth for participating modules.
 `magefiles/build.go` separates reusable submodules from runnable applications;
