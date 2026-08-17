@@ -255,13 +255,6 @@ bindings:
       sub_roles: [recommendation-generator]
       domain: retrieval-corpus
       execution_scope: request
-    - actor: memory-write
-      profile: applications/catalog/agents/knowledge-manager/memory-write/profile.yaml
-      classification: role_realization
-      primary_role: knowledge-manager
-      sub_roles: [ontology-manager]
-      domain: retrieval-corpus
-      execution_scope: request
     - actor: scenario-critic
       profile: applications/catalog/agents/scenario-critic/profile.yaml
       classification: test_harness
