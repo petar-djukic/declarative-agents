@@ -41,3 +41,7 @@ test_cases:
     integration_target: mage integration:helmSmoke
     status: implemented
     traces: [srd005-live-helm-smoke R3.3]
+
+preconditions:
+  - The applications/catalog checkout is discoverable or the demo.yaml catalog_root names it.
+  - The prepared role packages and the staged collector profile are present in the chart.

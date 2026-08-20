@@ -9,3 +9,9 @@ note: |
   deployment requirements, implementation status, Helm chart, and supporting
   evidence are owned by the canonical example under applications/chatbot-mesh/.
   This retained identifier exists only to redirect historical references.
+
+problem: See canonical_path.
+goals: []
+requirements: []
+non_goals: []
+acceptance_criteria: []
