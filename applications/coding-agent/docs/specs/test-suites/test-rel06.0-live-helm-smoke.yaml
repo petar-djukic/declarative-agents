@@ -35,3 +35,7 @@ test_cases:
     integration_target: mage integration:helmSmoke
     status: implemented
     traces: [srd005-live-helm-smoke AC1]
+
+preconditions:
+  - Docker, kind, Helm, kubectl, and the required local images are available.
+  - The agent-core and applications/catalog checkouts are present.

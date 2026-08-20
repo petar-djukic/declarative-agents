@@ -9,3 +9,9 @@ note: |
   provisioning-workflow-orchestrator application-specific composition, so its
   requirements and implementation evidence live with chatbot-mesh. This retained
   identifier exists only to redirect historical references.
+
+problem: See canonical_path.
+goals: []
+requirements: []
+non_goals: []
+acceptance_criteria: []

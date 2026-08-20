@@ -35,3 +35,7 @@ test_cases:
     go_test: go test ./magefiles -run '^Test(HelmPackageArchiveIsSelfContained|ChartArchiveValidationRejectsOmissions)$'
     status: implemented
     traces: [srd004-helm-package-validation AC3]
+
+preconditions:
+  - Helm is available.
+  - The

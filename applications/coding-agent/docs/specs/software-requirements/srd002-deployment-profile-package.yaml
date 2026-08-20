@@ -59,3 +59,16 @@ acceptance_criteria:
   - id: AC3
     criterion: mage audit boot-validates every produced role profile with the real agent binary.
     traces: [R4]
+
+goals:
+  - id: G1
+    text: Role-specific closures.
+  - id: G2
+    text: Safe reproducible package.
+  - id: G3
+    text: ConfigMap partitions.
+  - id: G4
+    text: Runtime proof.
+non_goals:
+  - Helm templates and values schema.
+  - Live Kubernetes installation or smoke testing.
