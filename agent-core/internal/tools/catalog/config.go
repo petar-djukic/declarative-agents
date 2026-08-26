@@ -55,6 +55,24 @@ type RenderEachConfig struct {
 	Signal       string `json:"signal"`
 }
 
+// FlatMapConfig holds one parent-array selector, parallel element-array fields,
+// parent fields copied onto each output row, and the success signal.
+type FlatMapConfig struct {
+	Items         string            `json:"items"`
+	ElementFields map[string]string `json:"element_fields"`
+	CarryFields   map[string]string `json:"carry_fields"`
+	Signal        string            `json:"signal"`
+}
+
+// ReorderByIndexConfig holds candidate and ordering-row selectors plus the
+// ordering row field that addresses each candidate.
+type ReorderByIndexConfig struct {
+	Items      string `json:"items"`
+	Order      string `json:"order"`
+	IndexField string `json:"index_field"`
+	Signal     string `json:"signal"`
+}
+
 // ValuePredicateConfig holds the value predicate word's operands, its
 // comparison, and the signal it emits for each outcome (srd041 R1.2, R1.4).
 // OperandType defaults to number when absent, because the ordering operators are
@@ -168,6 +186,14 @@ type LLMToolConfig struct {
 	// deterministic defaults (temperature 0, seed 42) applied at build time.
 	Temperature *float64 `json:"temperature"`
 	Seed        *int     `json:"seed"`
+}
+
+// ParseResponseConfig holds the state and parser profile used to validate one
+// invoke_llm response. The parse word owns these values so declaration order
+// among unrelated invoke words cannot change its behavior.
+type ParseResponseConfig struct {
+	ManifestState   string `json:"manifest_state"`
+	ResponseProfile string `json:"response_profile"`
 }
 
 // LoadSuiteConfig holds config for evaluator session setup tools.

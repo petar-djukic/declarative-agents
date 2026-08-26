@@ -1,0 +1,928 @@
+// Copyright (c) 2026 Nokia
+// SPDX-License-Identifier: BSD-3-Clause
+
+package doltcheckpoint
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sync"
+	"time"
+
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/doltsql"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
+)
+
+// ErrDolt is the base error for the Dolt-backed checkpoint adapter. Connection,
+// save, load, and revert failures wrap it so callers can classify by backend
+// (srd036-dolt-state-persistence R1.4).
+var ErrDolt = errors.New("dolt checkpoint")
+
+// ErrRevertUnresolved reports that a Revert target (run_id, step_index) does not
+// resolve to a recorded commit (srd036-dolt-state-persistence R6.5).
+var ErrRevertUnresolved = fmt.Errorf("%w: revert target not found", ErrDolt)
+
+type (
+	Database    = doltsql.Database
+	Transaction = doltsql.Transaction
+	Scanner     = doltsql.Scanner
+	Rows        = doltsql.Rows
+	Column      = doltsql.Column
+)
+
+// DoltCheckpoint implements the Checkpoint port on top of a versioned SQL
+// backend reached only through the Database seam. Each run executes on its own
+// branch, each loop step is one commit, and terminal runs merge to main
+// (srd036-dolt-state-persistence).
+type DoltCheckpoint struct {
+	db       Database
+	runID    string
+	terminal func(core.State) bool
+	inited   bool
+	// persistedExecution distinguishes a no-command terminal Position save
+	// from a dispatch save. The former updates only the machine position and
+	// must not rewrite the last Entry as a duplicate command step.
+	persistedExecution     core.Execution
+	hasPersistedExecution  bool
+	finalizing             bool
+	merged                 bool
+	finalized              bool
+	refMu                  sync.RWMutex
+	currentConversationRef string
+	currentDomainRef       string
+}
+
+var (
+	_ core.Checkpoint                    = (*DoltCheckpoint)(nil)
+	_ core.CheckpointReverter            = (*DoltCheckpoint)(nil)
+	_ core.ConversationReferenceProvider = (*DoltCheckpoint)(nil)
+	_ core.ConversationSnapshotResolver  = (*DoltCheckpoint)(nil)
+	_ core.DomainReferenceProvider       = (*DoltCheckpoint)(nil)
+	_ core.DomainSnapshotResolver        = (*DoltCheckpoint)(nil)
+)
+
+const doltSignalColumn = "`signal`"
+
+// NewDoltCheckpoint returns an adapter over an already-opened Database seam. The
+// terminal predicate, when non-nil, decides which Position current states merge
+// the run branch to main; a nil predicate never auto-merges.
+func NewDoltCheckpoint(db Database, runID string, terminal func(core.State) bool) *DoltCheckpoint {
+	return &DoltCheckpoint{
+		db:       db,
+		runID:    runID,
+		terminal: terminal,
+	}
+}
+
+// OpenDoltCheckpoint opens the Dolt database from a DSN and returns an adapter.
+// It registers the MySQL-wire "dolt" driver once so callers need not import a
+// SQL driver (srd036-dolt-state-persistence R1.3, R1.4).
+func OpenDoltCheckpoint(dsn, runID string, terminal func(core.State) bool) (*DoltCheckpoint, error) {
+	db, err := doltsql.OpenDB(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open %q: %v", ErrDolt, dsn, err)
+	}
+	// Dolt keeps the selected branch and database per session, and Save relies on
+	// the branch checked out in prepare() still being current when the step's
+	// transaction commits. Pin the pool to a single connection so every statement
+	// shares one session (srd036-dolt-state-persistence R4.2).
+	db.SetMaxOpenConns(1)
+	return NewDoltCheckpoint(doltsql.Wrap(db), runID, terminal), nil
+}
+
+// RegisterDriver registers the shared Dolt SQL driver.
+func RegisterDriver() { doltsql.RegisterDriver() }
+
+// Close releases the underlying database handle.
+func (d *DoltCheckpoint) Close() error { return d.db.Close() }
+
+// Save reconciles the persisted execution with the supplied history and creates
+// one Dolt commit per call on the run branch, all within a single transaction,
+// then merges to main when the Position current state is terminal
+// (srd036-dolt-state-persistence R4).
+func (d *DoltCheckpoint) Save(position core.Position, execution core.Execution) error {
+	isTerminal := d.terminal != nil && d.terminal(position.CurrentState)
+	if d.finalized {
+		return fmt.Errorf("%w: save run %q", core.ErrCheckpointFinalized, d.runID)
+	}
+	// A previous terminal Save committed successfully but did not finish branch
+	// cleanup. Retry only the unfinished lifecycle operation; writing another
+	// checkpoint would create a duplicate commit.
+	if d.finalizing {
+		if !isTerminal {
+			return fmt.Errorf("%w: save non-terminal position for run %q", core.ErrCheckpointFinalized, d.runID)
+		}
+		return d.Merge()
+	}
+
+	finalizationOnly := isTerminal &&
+		d.hasPersistedExecution &&
+		reflect.DeepEqual(execution, d.persistedExecution)
+	step := len(execution) - 1
+	var current core.Entry
+	if step >= 0 && !finalizationOnly {
+		current = execution[step]
+		sanitized, err := core.SanitizeResultDigestForSave(current.Result)
+		if err != nil {
+			return fmt.Errorf("%w: save: step %d output redaction: %v", ErrDolt, step, err)
+		}
+		current.Result = sanitized
+	}
+	if err := d.validateSnapshotReferences(position, step, isTerminal); err != nil {
+		return err
+	}
+	if err := d.prepare(); err != nil {
+		return err
+	}
+	sig := core.Signal("")
+	if step >= 0 && !finalizationOnly {
+		sig = current.Signal
+	}
+
+	tx, err := d.db.BeginTx(context.Background())
+	if err != nil {
+		return fmt.Errorf("%w: save: begin: %v", ErrDolt, err)
+	}
+	if err := writeMachine(tx, d.runID, position); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if !finalizationOnly {
+		if err := reconcileExecution(tx, d.runID, len(execution)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if step >= 0 {
+			if err := writeStep(tx, d.runID, step, current); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+	}
+	// Keep the terminal machine row as the durable lifecycle marker, but reap
+	// every run-owned history plane before committing and merging the branch.
+	// This prevents transient execution data from becoming part of main while
+	// making the terminal position and the reap one atomic Dolt commit.
+	if isTerminal {
+		if err := reapRunHistory(tx, d.runID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	message := commitMessage(step, sig)
+	if finalizationOnly {
+		message = terminalCommitMessage(position.CurrentState)
+	}
+	revision, err := commitDoltTransaction(tx, message)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("%w: save: commit step %d: %v", ErrDolt, step, err)
+	}
+	// DOLT_COMMIT is the durable version boundary and returns its exact hash.
+	// The remaining reference construction is local and prevalidated; tx.Commit
+	// releases the SQL transaction but cannot make an ambiguous hash lookup safe.
+	conversationRef, domainRef, err := d.savedSnapshotReferences(
+		position,
+		step,
+		isTerminal,
+		revision,
+	)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: save: tx commit: %v", ErrDolt, err)
+	}
+	d.setSnapshotReferences(conversationRef, domainRef)
+	d.persistedExecution = core.CloneExecution(execution)
+	d.hasPersistedExecution = true
+
+	if isTerminal {
+		d.finalizing = true
+		if err := d.Merge(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileExecution removes the replaced tail, including the final entry that
+// Save writes again below. Replacing that entry guarantees an empty receipt is
+// represented by row absence rather than preserving a receipt from an older
+// version of the same step.
+func reconcileExecution(tx Transaction, runID string, length int) error {
+	for _, table := range []string{"receipts", "tool_outputs", "execution_steps", "transitions"} {
+		query := fmt.Sprintf(`DELETE FROM %s WHERE run_id = ? AND step_index >= ?`, table)
+		if _, err := tx.ExecContext(context.Background(), query, runID, max(0, length-1)); err != nil {
+			return fmt.Errorf("%w: save: reconcile %s: %v", ErrDolt, table, err)
+		}
+	}
+	return nil
+}
+
+func reapRunHistory(tx Transaction, runID string) error {
+	for _, table := range []string{"receipts", "tool_outputs", "execution_steps", "transitions"} {
+		query := fmt.Sprintf(`DELETE FROM %s WHERE run_id = ?`, table)
+		if _, err := tx.ExecContext(context.Background(), query, runID); err != nil {
+			return fmt.Errorf("%w: save: reap terminal %s: %v", ErrDolt, table, err)
+		}
+	}
+	return nil
+}
+
+// Load reconstructs the Position and Execution from the latest commit on the run
+// branch, restoring the folded conversation and every opaque receipt. A terminal
+// marker completes pending merge/delete work and returns ErrCheckpointFinalized;
+// an already-deleted terminal branch resolves from its marker on main. Load
+// reports ErrNoCheckpoint when neither resumable nor finalized state exists
+// (srd036-dolt-state-persistence R5).
+func (d *DoltCheckpoint) Load() (core.Position, core.Execution, error) {
+	exists, err := doltBranchExists(d.db, d.runID)
+	if err != nil {
+		return core.Position{}, nil, fmt.Errorf("%w: load: inspect branch %q: %v", ErrDolt, d.runID, err)
+	}
+	if !exists {
+		return d.loadFinalized()
+	}
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutSQL, d.runID); err != nil {
+		return core.Position{}, nil, fmt.Errorf("%w: load: checkout branch %q: %v", ErrDolt, d.runID, err)
+	}
+	pos, err := loadMachine(d.db, d.runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return core.Position{}, nil, core.ErrNoCheckpoint
+		}
+		return core.Position{}, nil, fmt.Errorf("%w: load: machine: %v", ErrDolt, err)
+	}
+	exec, err := d.loadCurrentExecution(pos)
+	if err != nil {
+		return core.Position{}, nil, err
+	}
+	if d.terminal != nil && d.terminal(pos.CurrentState) {
+		// The terminal commit is the durable marker for an interrupted
+		// merge/delete lifecycle. A fresh adapter reconstructs finalizing from
+		// that marker and finishes cleanup before resume can enter the machine.
+		d.finalizing = true
+		if err := d.Merge(); err != nil {
+			return core.Position{}, nil, err
+		}
+		return pos, exec, fmt.Errorf("%w: load run %q", core.ErrCheckpointFinalized, d.runID)
+	}
+	return pos, exec, nil
+}
+
+func (d *DoltCheckpoint) loadCurrentExecution(position core.Position) (core.Execution, error) {
+	if err := ensureToolOutputRedactionColumns(d.db); err != nil {
+		return nil, fmt.Errorf("%w: load: redaction schema: %v", ErrDolt, err)
+	}
+	execution, err := loadExecution(d.db, d.runID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load: execution: %v", ErrDolt, err)
+	}
+	if err := d.refreshSnapshotReferences(position, execution); err != nil {
+		return nil, err
+	}
+	d.persistedExecution = core.CloneExecution(execution)
+	d.hasPersistedExecution = true
+	return execution, nil
+}
+
+// loadFinalized distinguishes a never-persisted run from one whose branch was
+// already merged and deleted. The terminal machine row retained on main is the
+// durable lifecycle marker; history remains reaped and no branch is recreated.
+func (d *DoltCheckpoint) loadFinalized() (core.Position, core.Execution, error) {
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutMainSQL); err != nil {
+		return core.Position{}, nil, fmt.Errorf("%w: load: checkout main: %v", ErrDolt, err)
+	}
+	machinesExist, err := doltMachinesTableExists(d.db)
+	if err != nil {
+		return core.Position{}, nil, fmt.Errorf("%w: load: inspect machines table: %v", ErrDolt, err)
+	}
+	if !machinesExist {
+		return core.Position{}, nil, core.ErrNoCheckpoint
+	}
+	pos, err := loadMachine(d.db, d.runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return core.Position{}, nil, core.ErrNoCheckpoint
+	}
+	if err != nil {
+		return core.Position{}, nil, fmt.Errorf("%w: load: machine on main: %v", ErrDolt, err)
+	}
+	if d.terminal == nil || !d.terminal(pos.CurrentState) {
+		return core.Position{}, nil, core.ErrNoCheckpoint
+	}
+	d.finalized = true
+	return pos, nil, fmt.Errorf("%w: load run %q", core.ErrCheckpointFinalized, d.runID)
+}
+
+func doltMachinesTableExists(db Database) (bool, error) {
+	var count int
+	err := db.QueryRowContext(context.Background(), `SELECT COUNT(*)
+		FROM information_schema.tables
+		WHERE table_schema = DATABASE()
+			AND table_name = 'machines'`).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func doltBranchExists(db Database, branch string) (bool, error) {
+	var count int
+	err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM dolt_branches WHERE name = ?`, branch).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// Merge merges the run branch to main and deletes it, run on a terminal state
+// (srd036-dolt-state-persistence R4.3). It is idempotent-safe to call once per
+// terminal run.
+func (d *DoltCheckpoint) Merge() error {
+	if d.finalized {
+		return fmt.Errorf("%w: merge run %q", core.ErrCheckpointFinalized, d.runID)
+	}
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutMainSQL); err != nil {
+		return fmt.Errorf("%w: merge: checkout main: %v", ErrDolt, err)
+	}
+	if !d.merged {
+		merged, err := d.mainHasTerminalMarker()
+		if err != nil {
+			return err
+		}
+		if !merged {
+			if _, err := d.db.ExecContext(context.Background(), doltsql.MergeSQL, d.runID); err != nil {
+				return fmt.Errorf("%w: merge: merge %q: %v", ErrDolt, d.runID, err)
+			}
+		}
+		d.merged = true
+	}
+	exists, err := doltBranchExists(d.db, d.runID)
+	if err != nil {
+		return fmt.Errorf("%w: merge: inspect branch %q: %v", ErrDolt, d.runID, err)
+	}
+	if exists {
+		if _, err := d.db.ExecContext(context.Background(), doltsql.DeleteBranchSQL, d.runID); err != nil {
+			return fmt.Errorf("%w: merge: delete branch %q: %v", ErrDolt, d.runID, err)
+		}
+	}
+	d.inited = false
+	d.finalizing = false
+	d.finalized = true
+	return nil
+}
+
+func (d *DoltCheckpoint) mainHasTerminalMarker() (bool, error) {
+	exists, err := doltMachinesTableExists(d.db)
+	if err != nil {
+		return false, fmt.Errorf("%w: merge: inspect machines table on main: %v", ErrDolt, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	pos, err := loadMachine(d.db, d.runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: merge: inspect terminal marker on main: %v", ErrDolt, err)
+	}
+	return d.terminal != nil && d.terminal(pos.CurrentState), nil
+}
+
+// Revert resets the run branch to the commit recorded at step_index for git-style
+// rollback of DB-persisted state only; file, HTTP, and workspace effects are
+// reversed by the lifecycle tool's receipt walk, not here
+// (srd036-dolt-state-persistence R6).
+func (d *DoltCheckpoint) Revert(runID string, stepIndex int) error {
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutSQL, runID); err != nil {
+		return fmt.Errorf("%w: revert: checkout %q: %v", ErrDolt, runID, err)
+	}
+	var hash string
+	row := d.db.QueryRowContext(context.Background(),
+		`SELECT commit_hash FROM dolt_log WHERE message LIKE ? ORDER BY date DESC LIMIT 1`,
+		fmt.Sprintf("step %d signal %%", stepIndex),
+	)
+	if err := row.Scan(&hash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: run %q step %d", ErrRevertUnresolved, runID, stepIndex)
+		}
+		return fmt.Errorf("%w: revert: lookup: %v", ErrDolt, err)
+	}
+	if _, err := d.db.ExecContext(context.Background(), doltsql.ResetHardSQL, hash); err != nil {
+		return fmt.Errorf("%w: revert: reset %q: %v", ErrDolt, hash, err)
+	}
+	d.setRevertedSnapshotReferences(runID, stepIndex, hash)
+	return nil
+}
+
+// prepare checks out (or creates) the run branch and creates the schema once.
+func (d *DoltCheckpoint) prepare() error {
+	if err := d.ensureBranch(); err != nil {
+		return err
+	}
+	if d.inited {
+		return nil
+	}
+	if err := createSchema(d.db); err != nil {
+		return err
+	}
+	d.inited = true
+	return nil
+}
+
+// ensureBranch selects the run branch, creating it from the current branch when
+// it is absent (srd036-dolt-state-persistence R4.2).
+func (d *DoltCheckpoint) ensureBranch() error {
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutSQL, d.runID); err == nil {
+		return nil
+	}
+	if _, err := d.db.ExecContext(context.Background(), doltsql.CheckoutNewBranchSQL, d.runID); err != nil {
+		return fmt.Errorf("%w: branch %q: %v", ErrDolt, d.runID, err)
+	}
+	return nil
+}
+
+// createSchema creates the generic five-table schema idempotently; it defines no
+// per-machine or per-run tables. tool_results is split into a forward plane
+// (tool_outputs: signal, output, error, cost) read by the command-state store and
+// a reverse plane (receipts: opaque receipt) consumed only by the rollback walk,
+// so a forward selector can never reach a receipt
+// (srd036-dolt-state-persistence R2, R3).
+func createSchema(db Database) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS machines (
+			run_id VARCHAR(255) PRIMARY KEY,
+			current_state VARCHAR(255) NOT NULL,
+			last_signal VARCHAR(255) NOT NULL,
+			iteration INT NOT NULL,
+			tokens_in INT NOT NULL,
+			tokens_out INT NOT NULL,
+			total_cost DOUBLE NOT NULL,
+			conversation LONGTEXT,
+			domain LONGTEXT,
+			iterator LONGTEXT,
+			program_profile LONGTEXT,
+			program_digest VARCHAR(64)
+		)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS transitions (
+			run_id VARCHAR(255) NOT NULL,
+			step_index INT NOT NULL,
+			from_state VARCHAR(255) NOT NULL,
+			%s VARCHAR(255) NOT NULL,
+			to_state VARCHAR(255) NOT NULL,
+			PRIMARY KEY (run_id, step_index)
+		)`,
+			doltSignalColumn),
+		`CREATE TABLE IF NOT EXISTS execution_steps (
+			run_id VARCHAR(255) NOT NULL,
+			step_index INT NOT NULL,
+			iteration INT NOT NULL,
+			ts VARCHAR(64) NOT NULL,
+			command_name VARCHAR(255) NOT NULL,
+			label VARCHAR(255),
+			PRIMARY KEY (run_id, step_index)
+		)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS tool_outputs (
+			run_id VARCHAR(255) NOT NULL,
+			step_index INT NOT NULL,
+			%s VARCHAR(255) NOT NULL,
+			output LONGTEXT,
+			error LONGTEXT,
+			redaction_version INT,
+			redacted_paths LONGTEXT,
+			redaction_status VARCHAR(32),
+			cost_duration BIGINT NOT NULL,
+			cost_tokens_in INT NOT NULL,
+			cost_tokens_out INT NOT NULL,
+			cost_dollars DOUBLE NOT NULL,
+			PRIMARY KEY (run_id, step_index)
+		)`,
+			doltSignalColumn),
+		`CREATE TABLE IF NOT EXISTS receipts (
+			run_id VARCHAR(255) NOT NULL,
+			step_index INT NOT NULL,
+			receipt LONGTEXT,
+			PRIMARY KEY (run_id, step_index)
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(context.Background(), s); err != nil {
+			return fmt.Errorf("%w: schema: %v", ErrDolt, err)
+		}
+	}
+	if err := ensureExecutionStepLabelColumn(db); err != nil {
+		return err
+	}
+	if err := ensureToolOutputRedactionColumns(db); err != nil {
+		return err
+	}
+	if err := ensureMachineIteratorColumn(db); err != nil {
+		return err
+	}
+	if err := ensureMachineProgramColumns(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureExecutionStepLabelColumn upgrades databases created before authored
+// labels existed. Dolt supports ADD COLUMN but not its IF NOT EXISTS form, so
+// the information_schema check makes the migration safe to rerun.
+func ensureExecutionStepLabelColumn(db Database) error {
+	var count int
+	err := db.QueryRowContext(context.Background(), `SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE()
+			AND table_name = 'execution_steps'
+			AND column_name = 'label'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("%w: schema: inspect execution_steps.label: %v", ErrDolt, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(context.Background(), `ALTER TABLE execution_steps ADD COLUMN label VARCHAR(255)`); err != nil {
+		return fmt.Errorf("%w: schema: add execution_steps.label: %v", ErrDolt, err)
+	}
+	return nil
+}
+
+func ensureToolOutputRedactionColumns(db Database) error {
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "redaction_version", definition: "INT"},
+		{name: "redacted_paths", definition: "LONGTEXT"},
+		{name: "redaction_status", definition: "VARCHAR(32)"},
+	}
+	for _, column := range columns {
+		var count int
+		query := fmt.Sprintf(`SELECT COUNT(*)
+			FROM information_schema.columns
+			WHERE table_schema = DATABASE()
+				AND table_name = 'tool_outputs'
+				AND column_name = '%s'`, column.name)
+		if err := db.QueryRowContext(context.Background(), query).Scan(&count); err != nil {
+			return fmt.Errorf("%w: schema: inspect tool_outputs.%s: %v", ErrDolt, column.name, err)
+		}
+		if count > 0 {
+			continue
+		}
+		if _, err := db.ExecContext(context.Background(), fmt.Sprintf(
+			"ALTER TABLE tool_outputs ADD COLUMN %s %s",
+			column.name,
+			column.definition,
+		)); err != nil {
+			return fmt.Errorf("%w: schema: add tool_outputs.%s: %v", ErrDolt, column.name, err)
+		}
+	}
+	return nil
+}
+
+func ensureMachineIteratorColumn(db Database) error {
+	var count int
+	err := db.QueryRowContext(context.Background(), `SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE()
+			AND table_name = 'machines'
+			AND column_name = 'iterator'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("%w: schema: inspect machines.iterator: %v", ErrDolt, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(context.Background(), `ALTER TABLE machines ADD COLUMN iterator LONGTEXT`); err != nil {
+		return fmt.Errorf("%w: schema: add machines.iterator: %v", ErrDolt, err)
+	}
+	return nil
+}
+
+func ensureMachineProgramColumns(db Database) error {
+	columns := []struct {
+		name, definition string
+	}{
+		{name: "domain", definition: "LONGTEXT"},
+		{name: "program_profile", definition: "LONGTEXT"},
+		{name: "program_digest", definition: "VARCHAR(64)"},
+	}
+	for _, column := range columns {
+		if err := ensureSchemaColumn(db, "machines", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureSchemaColumn(db Database, table, name, definition string) error {
+	var count int
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = '%s' AND column_name = '%s'`,
+		table, name)
+	if err := db.QueryRowContext(context.Background(), query).Scan(&count); err != nil {
+		return fmt.Errorf("%w: schema: inspect %s.%s: %v", ErrDolt, table, name, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(context.Background(), fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, definition)); err != nil {
+		return fmt.Errorf("%w: schema: add %s.%s: %v", ErrDolt, table, name, err)
+	}
+	return nil
+}
+
+// writeMachine upserts the resumable Position row keyed by run_id.
+func writeMachine(tx Transaction, runID string, p core.Position) error {
+	iterator, err := iteratorSnapshotArgument(p.Snapshot.Iterator)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		`REPLACE INTO machines
+			(run_id, current_state, last_signal, iteration, tokens_in, tokens_out, total_cost,
+			 conversation, domain, iterator, program_profile, program_digest)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		runID, string(p.CurrentState), string(p.LastSignal),
+		p.Snapshot.Iteration, p.Snapshot.TokensIn, p.Snapshot.TokensOut, p.Snapshot.TotalCost,
+		nullString(string(p.Snapshot.Conversation)),
+		nullString(string(p.Snapshot.Domain)), iterator,
+		nullString(p.Snapshot.Program.Profile), nullString(p.Snapshot.Program.Digest),
+	); err != nil {
+		return fmt.Errorf("%w: save: machine: %v", ErrDolt, err)
+	}
+	return nil
+}
+
+func iteratorSnapshotArgument(snapshot *core.IteratorSnapshot) (interface{}, error) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: save: iterator snapshot: %v", ErrDolt, err)
+	}
+	return string(encoded), nil
+}
+
+// writeStep appends one Execution entry across transitions, execution_steps,
+// tool_outputs, and receipts, keyed by (run_id, step_index) for idempotent retry.
+// The nullable execution_steps label preserves an authored address separately
+// from command_name; unlabeled and legacy rows restore an empty label.
+// The forward plane (tool_outputs) always gets a row; the reverse plane (receipts)
+// gets a row only when the entry carries a receipt, so an empty receipt is
+// represented by row absence and restores "" on Load. Both writes share the one
+// per-step transaction, so a step with an output row but no matching receipt row
+// is never committed (srd036-dolt-state-persistence R3, R4.1, R4.4).
+func writeStep(tx Transaction, runID string, step int, e core.Entry) error {
+	redactedPaths, err := redactedPathsArgument(e.Result.RedactedPaths)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		fmt.Sprintf(`REPLACE INTO transitions (run_id, step_index, from_state, %s, to_state) VALUES (?, ?, ?, ?, ?)`, doltSignalColumn),
+		runID, step, string(e.FromState), string(e.Signal), string(e.ToState),
+	); err != nil {
+		return fmt.Errorf("%w: save: transition: %v", ErrDolt, err)
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		`REPLACE INTO execution_steps (run_id, step_index, iteration, ts, command_name, label) VALUES (?, ?, ?, ?, ?, ?)`,
+		runID, step, e.Iteration, formatTS(e.Timestamp), e.CommandName, nullString(e.Label),
+	); err != nil {
+		return fmt.Errorf("%w: save: step: %v", ErrDolt, err)
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		fmt.Sprintf(`REPLACE INTO tool_outputs
+			(run_id, step_index, %s, output, error, redaction_version, redacted_paths, redaction_status,
+			 cost_duration, cost_tokens_in, cost_tokens_out, cost_dollars)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, doltSignalColumn),
+		runID, step, string(e.Result.Signal),
+		nullString(e.Result.Output), nullString(e.Result.Error),
+		int(e.Result.RedactionVersion), redactedPaths, string(e.Result.RedactionStatus),
+		int64(e.Result.Cost.Duration), e.Result.Cost.TokensIn, e.Result.Cost.TokensOut, e.Result.Cost.Dollars,
+	); err != nil {
+		return fmt.Errorf("%w: save: output: %v", ErrDolt, err)
+	}
+	if e.Receipt != "" {
+		if _, err := tx.ExecContext(context.Background(),
+			`REPLACE INTO receipts (run_id, step_index, receipt) VALUES (?, ?, ?)`,
+			runID, step, e.Receipt,
+		); err != nil {
+			return fmt.Errorf("%w: save: receipt: %v", ErrDolt, err)
+		}
+	}
+	return nil
+}
+
+func redactedPathsArgument(paths []core.OutputRedactionPath) (interface{}, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(paths)
+	if err != nil {
+		return nil, fmt.Errorf("%w: save: output redacted paths: %v", ErrDolt, err)
+	}
+	return string(encoded), nil
+}
+
+// loadMachine reads the Position row, returning sql.ErrNoRows when absent.
+func loadMachine(db Database, runID string) (core.Position, error) {
+	row, err := scanMachineRow(db, runID)
+	if err != nil {
+		return core.Position{}, err
+	}
+	pos := core.Position{
+		CurrentState: core.State(row.state),
+		LastSignal:   core.Signal(row.signal),
+		Snapshot: core.AgentSnapshot{
+			State: core.State(row.state), Signal: core.Signal(row.signal),
+			Iteration: row.iteration, TokensIn: row.tokensIn,
+			TokensOut: row.tokensOut, TotalCost: row.totalCost,
+		},
+	}
+	if err := restoreMachineOptionals(
+		&pos, row.conversation, row.domain, row.iterator,
+		row.programProfile, row.programDigest,
+	); err != nil {
+		return core.Position{}, err
+	}
+	return pos, nil
+}
+
+type persistedMachineRow struct {
+	state, signal                  string
+	iteration, tokensIn, tokensOut int
+	totalCost                      float64
+	conversation, domain, iterator sql.NullString
+	programProfile, programDigest  sql.NullString
+}
+
+func scanMachineRow(db Database, runID string) (persistedMachineRow, error) {
+	var row persistedMachineRow
+	err := db.QueryRowContext(context.Background(),
+		`SELECT current_state, last_signal, iteration, tokens_in, tokens_out, total_cost,
+			conversation, domain, iterator, program_profile, program_digest
+			FROM machines WHERE run_id = ?`, runID,
+	).Scan(
+		&row.state, &row.signal, &row.iteration, &row.tokensIn, &row.tokensOut, &row.totalCost,
+		&row.conversation, &row.domain, &row.iterator,
+		&row.programProfile, &row.programDigest,
+	)
+	return row, err
+}
+
+func restoreMachineOptionals(
+	pos *core.Position,
+	conversation, domain, iterator, programProfile, programDigest sql.NullString,
+) error {
+	if conversation.Valid && conversation.String != "" {
+		pos.Snapshot.Conversation = []byte(conversation.String)
+	}
+	if domain.Valid && domain.String != "" {
+		pos.Snapshot.Domain = []byte(domain.String)
+	}
+	if iterator.Valid && iterator.String != "" {
+		if err := json.Unmarshal([]byte(iterator.String), &pos.Snapshot.Iterator); err != nil {
+			return fmt.Errorf("%w: load: iterator snapshot: %v", ErrDolt, err)
+		}
+	}
+	if programProfile.Valid {
+		pos.Snapshot.Program.Profile = programProfile.String
+	}
+	if programDigest.Valid {
+		pos.Snapshot.Program.Digest = programDigest.String
+	}
+	return nil
+}
+
+// loadExecution reconstructs the ordered Execution, restoring each entry's output
+// from the tool_outputs forward plane and its opaque receipt from the receipts
+// reverse plane. tool_outputs is inner-joined because every step writes one; a
+// step with no receipt has no receipts row, so receipts is left-joined and the
+// absent row restores "" (srd036-dolt-state-persistence R3, R5.2).
+func loadExecution(db Database, runID string) (core.Execution, error) {
+	rows, err := db.QueryContext(context.Background(),
+		fmt.Sprintf(`SELECT es.step_index, es.iteration, es.ts, es.command_name, es.label,
+			t.from_state, t.to_state, t.%[1]s,
+			o.%[1]s, o.output, o.error, o.redaction_version, o.redacted_paths, o.redaction_status,
+			o.cost_duration, o.cost_tokens_in, o.cost_tokens_out, o.cost_dollars, r.receipt
+			FROM execution_steps es
+			JOIN transitions t ON t.run_id = es.run_id AND t.step_index = es.step_index
+			JOIN tool_outputs o ON o.run_id = es.run_id AND o.step_index = es.step_index
+			LEFT JOIN receipts r ON r.run_id = es.run_id AND r.step_index = es.step_index
+			WHERE es.run_id = ?
+			ORDER BY es.step_index`, doltSignalColumn), runID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var execution core.Execution
+	for rows.Next() {
+		var (
+			stepIndex, iteration                  int
+			ts, commandName                       string
+			fromState, toState, signal, resSignal string
+			label, output, errStr, receipt        sql.NullString
+			redactionVersion                      sql.NullInt64
+			redactedPaths, redactionStatus        sql.NullString
+			costDuration                          int64
+			costTokensIn, costTokensOut           int
+			costDollars                           float64
+		)
+		if err := rows.Scan(
+			&stepIndex, &iteration, &ts, &commandName, &label,
+			&fromState, &toState, &signal,
+			&resSignal, &output, &errStr, &redactionVersion, &redactedPaths, &redactionStatus,
+			&costDuration, &costTokensIn, &costTokensOut, &costDollars, &receipt,
+		); err != nil {
+			return nil, err
+		}
+		digest := core.ResultDigest{
+			Signal: core.Signal(resSignal),
+			Output: output.String,
+			Error:  errStr.String,
+			Cost: core.Cost{
+				Duration:  time.Duration(costDuration),
+				TokensIn:  costTokensIn,
+				TokensOut: costTokensOut,
+				Dollars:   costDollars,
+			},
+		}
+		if redactionVersion.Valid {
+			if redactionVersion.Int64 < 0 || redactionVersion.Int64 > int64(^uint16(0)) {
+				return nil, fmt.Errorf("step %d redaction version %d is out of range", stepIndex, redactionVersion.Int64)
+			}
+			digest.RedactionVersion = uint16(redactionVersion.Int64)
+			digest.RedactionStatus = core.OutputRedactionStatus(redactionStatus.String)
+			if redactedPaths.Valid && redactedPaths.String != "" {
+				if err := json.Unmarshal([]byte(redactedPaths.String), &digest.RedactedPaths); err != nil {
+					return nil, fmt.Errorf("step %d redacted paths: %w", stepIndex, err)
+				}
+			}
+		}
+		execution = append(execution, core.Entry{
+			Iteration:   iteration,
+			Timestamp:   parseTS(ts),
+			CommandName: commandName,
+			Label:       label.String,
+			FromState:   core.State(fromState),
+			ToState:     core.State(toState),
+			Signal:      core.Signal(signal),
+			Result:      digest,
+			Receipt:     receipt.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return execution, nil
+}
+
+// commitMessage encodes the step index and signal as Dolt commit metadata so
+// Revert can resolve a step to its commit (srd036-dolt-state-persistence R4.1).
+func commitMessage(step int, sig core.Signal) string {
+	if step < 0 {
+		return "step init signal Seed"
+	}
+	return fmt.Sprintf("step %d signal %s", step, sig)
+}
+
+func terminalCommitMessage(state core.State) string {
+	return fmt.Sprintf("finalize terminal state %s", state)
+}
+
+// nullString maps an empty string to SQL NULL so absent values (for example a
+// read-only tool's receipt) store NULL and restore empty
+// (srd036-dolt-state-persistence R3.4).
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func formatTS(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func parseTS(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}

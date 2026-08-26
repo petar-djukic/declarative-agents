@@ -34,7 +34,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Adjacent label selection threads the previous word's output
-    go_test: go test ./internal/tools/rest -run TestRESTClient_CommandStateThreadsNonAdjacentStep
+    go_test: go test ./internal/tools/rest/client -run TestRESTClient_CommandStateThreadsNonAdjacentStep
     status: implemented
     description: |
       A query word directly after an embed word selects the embed word's output
@@ -54,7 +54,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Non-adjacent label selection reaches past an intervening word
-    go_test: go test ./internal/tools/rest -run 'TestRESTClient_CommandState(ThreadsNonAdjacentStep|TracerBulletNonAdjacentWithRestart)'
+    go_test: go test ./internal/tools/rest/client -run 'TestRESTClient_CommandState(ThreadsNonAdjacentStep|TracerBulletNonAdjacentWithRestart)'
     status: implemented
     description: |
       In a three-word chain the third word selects the first word's vector by
@@ -278,7 +278,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Synthetic restart rehydration resolves the same command-name address
-    go_test: go test ./internal/runtime/core -run 'TestCommandStateViewRehydrates(AcrossInMemoryCheckpoint|FromDoltLoad)'
+    go_test: go test ./internal/runtime/core ./internal/runtime/checkpoint/dolt -run 'TestCommandStateViewRehydrates(AcrossInMemoryCheckpoint|FromDoltLoad)'
     status: implemented
     coverage: component-integration
     description: |
@@ -298,7 +298,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Real MachineSpec labels survive schema upgrade and restart rehydration
-    go_test: go test ./internal/runtime/core -run 'Test(DoltCheckpointSchemaUpgradeAddsNullableLabel|CommandStateAuthoredLabelPersistsAcrossDoltRestart)'
+    go_test: go test ./internal/runtime/checkpoint/dolt -run 'Test(DoltCheckpointSchemaUpgradeAddsNullableLabel|CommandStateAuthoredLabelPersistsAcrossDoltRestart)'
     status: implemented
     owner: GH-781
     coverage: component-integration
@@ -326,7 +326,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Selector rejection table blocks unsafe threading
-    go_test: go test ./internal/tools/rest -run 'TestRESTClient_CommandState(RejectionTable|MissNamesLabel|NoViewConfiguredRejected)'
+    go_test: go test ./internal/tools/rest/client -run 'TestRESTClient_CommandState(RejectionTable|MissNamesLabel|NoViewConfiguredRejected)'
     status: implemented
     description: |
       The R13.3 rejection list applies to command_state threading: an undeclared
@@ -347,7 +347,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: REST response mapping emits typed redaction before persistence
-    go_test: go test ./internal/tools/rest -run TestRESTClient_RedactionRunsBeforePersistence
+    go_test: go test ./internal/tools/rest/client -run TestRESTClient_RedactionRunsBeforePersistence
     status: implemented
     coverage: component-integration
     description: |
@@ -372,7 +372,7 @@ test_cases:
 
   - use_case: rel07.0-uc001-command-state-threading
     name: Typed redaction denies sensitive output live and after persistence
-    go_test: go test ./internal/runtime/core ./internal/tools/rest -run 'Test(DoltCheckpoint(ReappliesAndPersistsOutputRedaction|PersistsFailClosedRedactionRow)|OutputRedactionFailsClosed|CommandStateRejectsUnversionedLegacyOutput|RESTClient_RedactionRunsBeforePersistence)'
+    go_test: go test ./internal/runtime/core ./internal/runtime/checkpoint/dolt ./internal/tools/rest -run 'Test(DoltCheckpoint(ReappliesAndPersistsOutputRedaction|PersistsFailClosedRedactionRow)|OutputRedactionFailsClosed|CommandStateRejectsUnversionedLegacyOutput|RESTClient_RedactionRunsBeforePersistence)'
     status: implemented
     owner: GH-489
     coverage: component-integration
@@ -405,7 +405,7 @@ test_cases:
 
   - use_case: rel07.0-uc002-two-plane-revert
     name: Five-table round-trip persists and restores both planes
-    go_test: go test ./internal/runtime/core -run 'TestDoltCheckpoint(SaveLoadRoundTrip|SplitsToolOutputsAndReceipts)'
+    go_test: go test ./internal/runtime/checkpoint/dolt -run 'TestDoltCheckpoint(SaveLoadRoundTrip|SplitsToolOutputsAndReceipts)'
     status: implemented
     description: |
       A three-step run writes a tool_outputs row and a receipts row per step in
@@ -424,7 +424,7 @@ test_cases:
 
   - use_case: rel07.0-uc002-two-plane-revert
     name: Revert reaps later two-plane rows and invalidates store entries
-    go_test: go test ./internal/runtime/core -run 'TestDoltCheckpoint(RevertReapsBothPlanes|TerminalReapsRunHistoryBeforeMerge)'
+    go_test: go test ./internal/runtime/checkpoint/dolt -run 'TestDoltCheckpoint(RevertReapsBothPlanes|TerminalReapsRunHistoryBeforeMerge)'
     status: implemented
     description: |
       Revert(run_id, 1) resets the run branch so the tool_outputs and receipts
@@ -444,7 +444,7 @@ test_cases:
 
   - use_case: rel07.0-uc002-two-plane-revert
     name: Dolt component restores surviving receipts after reaping later rows
-    go_test: go test ./internal/runtime/core -run TestDoltCheckpointReceiptWalkReversesSurvivingStep
+    go_test: go test ./internal/runtime/checkpoint/dolt -run TestDoltCheckpointReceiptWalkReversesSurvivingStep
     status: implemented
     description: |
       This component test calls Revert and Load through the Dolt adapter, then

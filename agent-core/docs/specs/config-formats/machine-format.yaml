@@ -112,7 +112,9 @@ schema:
     type: object
     required: true
     description: |
-      Resource limits that bound the agent's execution.
+      Resource limits that bound the agent's execution. MachineSpec is the sole
+      authority for run-level max_tokens and max_duration; invoke_llm word
+      configuration cannot replace either value.
     sub_fields:
       - field: max_iterations
         type: int
@@ -462,6 +464,14 @@ state_scoped_dynamic_dispatch:
     current-state availability set used for the manifest. Unknown tools,
     internal tools, and tools not valid in the current state are rejected before
     command execution.
+
+    Before registration, the invoke_llm selector and parse_response word on an
+    actual selector-to-$tool machine path must each declare the `$tool` target
+    as manifest_state. Unrelated invoke words are not selectors for that path
+    and do not participate. Every external word must derive at least one target
+    phase. A mismatch, empty explicit-phase intersection, missing emitted-signal
+    declaration, or unroutable emitted signal rejects startup with the word and
+    cause.
   rejection_signal: |
     A parsed tool call that names a registered external tool outside the
     current state's availability set emits ParseFailed. The diagnostic should
@@ -529,12 +539,15 @@ validation_rules: |
     and sequential forbids it; failure is fail_fast or collect_all
   - collect_all requires a partial join signal
 
-  Phase 2 — BuildTransitionTable():
+  Phase 2 — runtime tool wiring and BuildTransitionTable():
   - Named actions (not $tool, not empty) must resolve to a registered tool
   - $tool requires a non-nil ToolAction callback
   - Dynamic $tool availability is derived from the current state, the next
     $tool transition, and selected external ToolDef emits
   - Explicit ToolSpec phases may only narrow the transition-derived set
+  - The invoke_llm selector and parse_response word linked to a $tool path must
+    each declare that $tool target as manifest_state
+  - Every selected external word must derive at least one dynamic phase
 
   Profile closure timeout inspection occurs after profile-owned paths,
   declaration includes and overrides, REST definitions, and environment

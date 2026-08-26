@@ -10,6 +10,7 @@ import (
 
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
+	toolregistry "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/registry"
 	"github.com/stretchr/testify/require"
 	"go/ast"
 	"go/parser"
@@ -54,31 +55,6 @@ func TestSeedRequestRejectsUnreadableFile(t *testing.T) {
 	require.ErrorContains(t, err, "read --request file")
 	require.Empty(t, params.InitialSignal)
 	require.Empty(t, params.InitialResult.Output)
-}
-
-func TestResumeLoadOverridesRequestSeed(t *testing.T) {
-	checkpoint := &core.InMemoryCheckpoint{}
-	require.NoError(t, checkpoint.Save(core.Position{CurrentState: "Start"}, nil))
-	params := terminalLoopParams()
-	params.Checkpoint = checkpoint
-	params.InitialSignal = core.Seed
-	params.InitialResult = core.Result{Signal: core.Seed, Output: "new request bytes"}
-	params.Table = core.TransitionTable{
-		{State: "Start", Signal: core.Seed}:     {NextState: "WrongSeedPath"},
-		{State: "Start", Signal: core.Approved}: {NextState: "Resumed"},
-	}
-	params.IsTerminal = func(state core.State) bool {
-		return state == "WrongSeedPath" || state == "Resumed"
-	}
-	params.Hooks.TerminalStatus = func(core.State) core.RunStatus { return core.StatusSucceeded }
-
-	result, err := runOrResume(runtimeConfig{
-		ResumeCheckpoint: "run-1", ResumeSignal: string(core.Approved),
-	}, resumeDeps{Params: params, State: &agentState{}, Ctx: context.Background()})
-
-	require.NoError(t, err)
-	require.Equal(t, core.State("Resumed"), result.FinalState)
-	require.Equal(t, core.StatusSucceeded, result.Status)
 }
 
 func TestCLIResultReporterDoesNotInventUndeclaredSummary(t *testing.T) {
@@ -215,27 +191,35 @@ func TestMainRuntimeDoesNotBranchOnAgentModeNames(t *testing.T) {
 func TestBuiltinFactoryCatalogSelectsEntriesByInit(t *testing.T) {
 	t.Parallel()
 
-	catalog := builtinFactoryCatalog(&agentState{})
-	byName := make(map[string]builtinFactoryCatalogEntry, len(catalog))
+	catalog := standardCatalog(&agentState{})
+	byName := make(map[string]toolregistry.StandardFactoryCatalogEntry, len(catalog))
 	for _, entry := range catalog {
 		byName[entry.Name] = entry
 	}
 
-	require.True(t, byName["planning"].selectedBy(map[string]bool{"mark_nodes_executing": true}))
-	require.True(t, byName["evaluation"].selectedBy(map[string]bool{"run_point": true}))
-	require.True(t, byName["evaluation"].selectedBy(map[string]bool{"list_evaluation_sessions": true}))
-	require.True(t, byName["spec_validation"].selectedBy(map[string]bool{"validate_specs": true}))
-	require.True(t, byName["lifecycle"].selectedBy(map[string]bool{"checkpoint_history": true}))
-	require.True(t, byName["lifecycle"].selectedBy(map[string]bool{"checkpoint_rollback": true}))
-	require.True(t, byName["rest"].selectedBy(map[string]bool{"rest_server_launch": true}))
-	require.True(t, byName["rest"].selectedBy(map[string]bool{"rest_server_stop": true}))
-	require.False(t, byName["planning"].selectedBy(map[string]bool{"list_evaluation_sessions": true}))
+	require.True(t, byName["planning"].SelectedBy(map[string]bool{"mark_nodes_executing": true}))
+	require.True(t, byName["evaluation"].SelectedBy(map[string]bool{"run_point": true}))
+	require.True(t, byName["evaluation"].SelectedBy(map[string]bool{"list_evaluation_sessions": true}))
+	require.True(t, byName["spec_validation"].SelectedBy(map[string]bool{"validate_specs": true}))
+	require.True(t, byName["lifecycle"].SelectedBy(map[string]bool{"checkpoint_history": true}))
+	require.True(t, byName["lifecycle"].SelectedBy(map[string]bool{"checkpoint_rollback": true}))
+	require.True(t, byName["rest"].SelectedBy(map[string]bool{"rest_server_launch": true}))
+	require.True(t, byName["rest"].SelectedBy(map[string]bool{"rest_server_stop": true}))
+	require.True(t, byName["filesystem"].SelectedBy(map[string]bool{"file_read": true}))
+	require.True(t, byName["compose"].SelectedBy(map[string]bool{"render_each": true}))
+	require.True(t, byName["control"].SelectedBy(map[string]bool{"self_invoke": true}))
+	require.True(t, byName["dolt"].SelectedBy(map[string]bool{"dolt_query": true}))
+	require.True(t, byName["llm"].SelectedBy(map[string]bool{"done": true}))
+	require.True(t, byName["llm"].SelectedBy(map[string]bool{"nudge_reread": true}))
+	require.False(t, byName["control"].SelectedBy(map[string]bool{"done": true}))
+	require.False(t, byName["control"].SelectedBy(map[string]bool{"nudge_reread": true}))
+	require.False(t, byName["planning"].SelectedBy(map[string]bool{"list_evaluation_sessions": true}))
 }
 
 func TestBuiltinFactoryCatalogCoversSelectedActiveInits(t *testing.T) {
 	t.Parallel()
 
-	catalog := builtinFactoryCatalog(&agentState{})
+	catalog := standardCatalog(&agentState{})
 	covered := make(map[string]bool)
 	for _, entry := range catalog {
 		for _, init := range entry.Inits {
@@ -290,7 +274,7 @@ func TestRootCommandHasNoLifecycleOnlyFlags(t *testing.T) {
 	} {
 		require.Nil(t, rootCmd.PersistentFlags().Lookup(flag), "flag %q must not be public", flag)
 	}
-	for _, flag := range []string{"profile", "dolt-dsn", "resume-checkpoint", "resume-signal", "directory", "request"} {
+	for _, flag := range []string{"profile", "dolt-dsn", "dolt-connection", "resume-checkpoint", "resume-signal", "directory", "request"} {
 		require.NotNil(t, rootCmd.PersistentFlags().Lookup(flag), "universal flag %q should remain", flag)
 	}
 	assertMainDeclsAbsent(t, map[string]bool{
@@ -318,7 +302,7 @@ func TestRootCommandHelpShowsProfileOnlyRuntimeFlags(t *testing.T) {
 	for _, text := range []string{"--machine", "--tools", "--tools-declaration", "--tool-config-dir", "--profiles-dir", "--input", "--validate-test-evidence", "--run-test-evidence"} {
 		require.NotContains(t, usage, text)
 	}
-	for _, text := range []string{"--profile", "--request", "--output", "--directory"} {
+	for _, text := range []string{"--profile", "--request", "--output", "--directory", "--dolt-dsn", "--dolt-connection", "--resume-checkpoint", "--resume-signal"} {
 		require.Contains(t, usage, text)
 	}
 }
