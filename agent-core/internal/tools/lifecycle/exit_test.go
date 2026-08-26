@@ -21,6 +21,7 @@ import (
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	toolregistry "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/registry"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest"
+	restdef "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest/definition"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/pkg/spec"
 )
 
@@ -223,6 +224,9 @@ func TestControlProfileSelectsExitAgentFlow(t *testing.T) {
 
 func launchControlServer(t *testing.T) (*rest.ServerState, string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("integration-grade: production REST server launch binds a real loopback listener")
+	}
 	collection, err := rest.LoadDefinitions([]string{controlRestPath(t)}, nil)
 	require.NoError(t, err)
 	def, err := collection.ResolveServer("agent_control")
@@ -235,28 +239,31 @@ func launchControlServer(t *testing.T) (*rest.ServerState, string) {
 
 func launchModeledControlServer(t *testing.T) (*rest.ServerState, string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("integration-grade: production REST server launch binds a real loopback listener")
+	}
 	state := rest.NewServerState()
 	output, err := state.Launch(rest.ServerDefinition{
 		Name: "modeled_control",
-		Server: rest.Server{
+		Server: restdef.Server{
 			Address:   "127.0.0.1:0",
-			Queue:     rest.QueueConfig{Name: "modeled_control", Capacity: 8, Overflow: "reject", Timeout: "30s"},
-			Shutdown:  rest.ShutdownConfig{Timeout: "5s", DrainPolicy: "drain"},
-			Endpoints: map[string]rest.Endpoint{"exit": modeledExitEndpoint()},
+			Queue:     restdef.QueueConfig{Name: "modeled_control", Capacity: 8, Overflow: "reject", Timeout: "30s"},
+			Shutdown:  restdef.ShutdownConfig{Timeout: "5s", DrainPolicy: "drain"},
+			Endpoints: map[string]restdef.Endpoint{"exit": modeledExitEndpoint()},
 		},
 	})
 	require.NoError(t, err)
 	return state, "http://" + output["address"].(string)
 }
 
-func modeledExitEndpoint() rest.Endpoint {
-	return rest.Endpoint{
+func modeledExitEndpoint() restdef.Endpoint {
+	return restdef.Endpoint{
 		Method: "POST", Path: "/api/lifecycle/exit", Binding: "lifecycle_control",
-		LifecycleControl: rest.LifecycleControl{
+		LifecycleControl: restdef.LifecycleControl{
 			Action: "exit", Signal: "ExitRequested", TargetSchema: stringBodySchema("reason"),
 		},
-		Request:  rest.RequestBinding{BodySchema: stringBodySchema("reason")},
-		Response: rest.ResponseMapping{Output: map[string]string{"accepted": "true"}},
+		Request:  restdef.RequestBinding{BodySchema: stringBodySchema("reason")},
+		Response: restdef.ResponseMapping{Output: map[string]string{"accepted": "true"}},
 	}
 }
 

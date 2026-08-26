@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/spf13/pflag"
+
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	toolregistry "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/registry"
@@ -24,10 +26,29 @@ type ConnectionResolver interface {
 }
 
 type FactoryDeps struct {
-	Opener             DatabaseOpener
-	Connections        ConnectionResolver
-	CheckpointIdentity *DatabaseIdentity
+	Opener                DatabaseOpener
+	Connections           ConnectionResolver
+	CheckpointIdentity    *DatabaseIdentity
+	CheckpointIdentityErr error
 }
+
+type Config struct {
+	Connections map[string]string // --dolt-connection
+}
+
+func (c *Config) RegisterFlags(fs *pflag.FlagSet) {
+	fs.StringToStringVar(&c.Connections, "dolt-connection", nil, "named Dolt word DSN (NAME=DSN); independent of --dolt-dsn")
+}
+
+type StaticConnections map[string]string
+
+func (c StaticConnections) ResolveConnection(_ context.Context, ref string, _ map[string]string) (string, error) {
+	if value := c[ref]; value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("configured Dolt connection reference %q is unavailable", ref)
+}
+
 type builderConfig struct {
 	toolName string
 	config   *PreparedConfig
@@ -50,6 +71,21 @@ func QueryFactory(deps FactoryDeps) toolregistry.BuiltinFactory {
 func WriteFactory(deps FactoryDeps) toolregistry.BuiltinFactory {
 	return operationFactory(KindWrite, deps)
 }
+
+func RegisterFactories(br *toolregistry.BuiltinRegistry, deps FactoryDeps) {
+	register := func(init string, factory toolregistry.BuiltinFactory) {
+		br.Register(init, func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
+			if deps.CheckpointIdentityErr != nil {
+				return nil, deps.CheckpointIdentityErr
+			}
+			return factory(def, vars)
+		})
+	}
+	register(InitProvision, ProvisionFactory(deps))
+	register(InitQuery, QueryFactory(deps))
+	register(InitWrite, WriteFactory(deps))
+}
+
 func operationFactory(kind OperationKind, deps FactoryDeps) toolregistry.BuiltinFactory {
 	return func(def catalog.ToolDef, vars map[string]string) (core.Builder, error) {
 		prepared, err := DecodeConfig(def)

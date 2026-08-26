@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	rtcheckpoint "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/checkpoint"
+	doltcheckpoint "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/checkpoint/dolt"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	tooldolt "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/dolt"
@@ -32,7 +34,7 @@ const (
 // proof that configured provision, query, and write words compose with Dolt.
 func TestDoltWordIntegration(t *testing.T) {
 	base := startDoltServer(t)
-	t.Setenv(doltWordConnectionRef, base)
+	connections := map[string]string{doltWordConnectionRef: base}
 
 	provision := configuredDoltWord(t, "provision_records", tooldolt.InitProvision, map[string]interface{}{
 		"connection_ref": doltWordConnectionRef,
@@ -105,7 +107,7 @@ func TestDoltWordIntegration(t *testing.T) {
 	})
 
 	registry, err := registerConfiguredDoltWords(
-		&agentState{}, provision, incompatibleProvision, insert, query, updateMissing,
+		&agentState{doltConnections: connections}, provision, incompatibleProvision, insert, query, updateMissing,
 	)
 	require.NoError(t, err)
 
@@ -252,7 +254,7 @@ func TestDoltWordIntegration(t *testing.T) {
 
 	t.Run("accepts separate checkpoint database on same server", func(t *testing.T) {
 		requireDoltDatabase(t, base, doltCheckpointDB)
-		checkpoint, err := core.OpenDoltCheckpoint(
+		checkpoint, err := doltcheckpoint.OpenDoltCheckpoint(
 			base+doltCheckpointDB,
 			"dolt-word-integration",
 			func(core.State) bool { return false },
@@ -271,7 +273,10 @@ func TestDoltWordIntegration(t *testing.T) {
 		))
 
 		separateState := newAgentState(
-			runtimeConfig{DoltDSN: base + doltCheckpointDB},
+			runtimeConfig{
+				Checkpoint:      rtcheckpoint.Config{DoltDSN: base + doltCheckpointDB},
+				DoltConnections: connections,
+			},
 			agentStateDeps{},
 		)
 		separateRegistry, err := registerConfiguredDoltWords(separateState, query)
@@ -285,7 +290,10 @@ func TestDoltWordIntegration(t *testing.T) {
 	t.Run("rejects exact checkpoint and word database identity at startup", func(t *testing.T) {
 		before := doltCommitCount(t, base, doltWordDatabase)
 		collidingState := newAgentState(
-			runtimeConfig{DoltDSN: base + doltWordDatabase},
+			runtimeConfig{
+				Checkpoint:      rtcheckpoint.Config{DoltDSN: base + doltWordDatabase},
+				DoltConnections: connections,
+			},
 			agentStateDeps{},
 		)
 		_, err := registerConfiguredDoltWords(collidingState, query)

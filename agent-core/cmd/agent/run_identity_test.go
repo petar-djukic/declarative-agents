@@ -10,7 +10,9 @@ import (
 
 	monitorruntime "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/monitor/runtimeconfig"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
+	rtcheckpoint "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/checkpoint"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/version"
 )
 
 func TestResolveRunIDFreshRunsDifferAndResumeRetainsID(t *testing.T) {
@@ -22,37 +24,33 @@ func TestResolveRunIDFreshRunsDifferAndResumeRetainsID(t *testing.T) {
 	require.NotEmpty(t, first)
 	require.NotEqual(t, first, second)
 
-	resumed, err := resolveRunID(runtimeConfig{ResumeCheckpoint: first})
+	resumed, err := resolveRunID(runtimeConfig{Checkpoint: rtcheckpoint.Config{ResumeCheckpoint: first}})
 	require.NoError(t, err)
 	require.Equal(t, first, resumed)
 }
 
 func TestResolveRunIDRejectsUnsupportedLatestAlias(t *testing.T) {
-	_, err := resolveRunID(runtimeConfig{ResumeCheckpoint: "latest"})
+	_, err := resolveRunID(runtimeConfig{Checkpoint: rtcheckpoint.Config{ResumeCheckpoint: "latest"}})
 
 	require.ErrorContains(t, err, "--resume-checkpoint")
 	require.ErrorContains(t, err, "provide an explicit run id")
 }
 
 func TestRunIDIsSharedByCheckpointAndLoopWithoutChangingAgentName(t *testing.T) {
-	originalOpen := openDoltCheckpoint
-	t.Cleanup(func() { openDoltCheckpoint = originalOpen })
+	originalOpen := rtcheckpoint.OpenDolt
+	t.Cleanup(func() { rtcheckpoint.OpenDolt = originalOpen })
 
 	const runID = "run-shared"
 	var checkpointRunID string
-	checkpoint := &closingCheckpoint{}
-	openDoltCheckpoint = func(_, id string, _ func(core.State) bool) (closeableCheckpoint, error) {
+	cp := &closingCheckpoint{}
+	rtcheckpoint.OpenDolt = func(_, id string, _ func(core.State) bool) (closeableCheckpoint, error) {
 		checkpointRunID = id
-		return checkpoint, nil
+		return cp, nil
 	}
 
-	opened, err := resolveCheckpoint(
-		runtimeConfig{DoltDSN: "test-dsn"},
-		core.MachineSpec{},
-		runID,
-	)
+	opened, err := rtcheckpoint.Config{DoltDSN: "test-dsn"}.Open(core.MachineSpec{}, runID)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, opened.close()) })
+	t.Cleanup(func() { require.NoError(t, opened.Close()) })
 
 	params := loopParams(runtimeConfig{}, loopParamDeps{
 		Machine:  core.MachineSpec{},
@@ -75,7 +73,8 @@ func TestMachineNameDrivesSpanAndMetricIdentity(t *testing.T) {
 		Tracer: tracing.NoopTracer{},
 	})
 	require.Equal(t, "planner", params.AgentName)
-	require.Equal(t, agentVersion, params.AgentVersion)
+	require.Equal(t, version.Version, params.AgentVersion)
+	require.Equal(t, version.String(), rootCmd.Version)
 
 	monitorConfig, err := monitorruntime.CompileRecorderConfig(machine, nil, "run-planner")
 	require.NoError(t, err)

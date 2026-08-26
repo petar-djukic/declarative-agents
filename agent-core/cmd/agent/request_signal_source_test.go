@@ -19,6 +19,7 @@ import (
 
 	modelllm "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/model/llm"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/checkpoint"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	toollm "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/llm"
@@ -28,8 +29,8 @@ import (
 func TestRequestSignalSource_ModelFreeProfile(t *testing.T) {
 	prepared := prepareRequestSignalFixture(t, "")
 	require.NotNil(t, prepared.State.conversation, "a conversation container may exist without a model client")
-	require.Empty(t, prepared.State.model)
-	require.Empty(t, prepared.State.providerName)
+	require.Empty(t, prepared.State.ensureResolved().Model)
+	require.Empty(t, prepared.State.ensureResolved().ProviderName)
 	_, modelRegistered := prepared.State.registry.Resolve("invoke_llm")
 	require.False(t, modelRegistered)
 
@@ -231,7 +232,7 @@ func prepareRequestSignalFixture(t *testing.T, doltDSN string) preparedRun {
 		Tools: profile.Tools, ToolDeclarations: profile.ToolDeclarations,
 		ToolConfigDirs: profile.ToolConfigDirs, RestDefinitions: profile.RestDefinitions,
 		RestConfigDirs: profile.RestConfigDirs, Directory: profile.Directory,
-		DoltDSN: doltDSN,
+		Checkpoint: checkpoint.Config{DoltDSN: doltDSN},
 	}
 	defs, restDefs, err := loadRuntimeDefinitions(cfg)
 	require.NoError(t, err)

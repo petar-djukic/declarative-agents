@@ -119,9 +119,8 @@ schema:
           type: int
           required: false
           description: |
-            Maximum run time in seconds. Sets the budget.MaxDuration
-            for the entire agent run (not per-call). When elapsed,
-            the context is cancelled and the loop terminates.
+            Legacy per-call timeout in seconds. Used only when llm_timeout is
+            absent. It never changes the machine run budget.
 
         - field: context_limit
           type: int
@@ -167,14 +166,15 @@ schema:
           required: false
           description: |
             Per-LLM-call timeout in seconds. Individual calls that
-            exceed this limit are cancelled and retried.
+            exceed this limit are cancelled and retried. When both llm_timeout
+            and max_time are present, llm_timeout takes precedence.
 
         - field: max_tokens
           type: int
           required: false
           description: |
-            Maximum total tokens for the agent run budget. When
-            exceeded, triggers BudgetExhausted.
+            Deprecated compatibility input. It does not change the run budget;
+            declare budget.max_tokens on the machine instead.
 
         - field: ollama_url
           type: string
@@ -182,6 +182,26 @@ schema:
           description: |
             Alias for provider_url. If both are set, provider_url
             takes precedence.
+
+parse_response_config:
+  purpose: |
+    Defines the validation state and parser profile owned by one parse_response
+    ToolDef. These values do not come from mutable invoke_llm registration
+    state.
+  fields:
+    - field: manifest_state
+      type: string
+      required: true when the parse word feeds $tool
+      description: |
+        The `$tool` target state whose external vocabulary validates the parsed
+        tool name. Startup links the actual selector, parser, and dynamic
+        transition and rejects a different value.
+    - field: response_profile
+      type: string
+      required: false
+      description: |
+        Explicit parser profile for this parse word. When omitted, the existing
+        resolved model parser remains the compatibility fallback.
 
 per_model_pattern: |
   Each file under an agent's llm/ directory configures a different

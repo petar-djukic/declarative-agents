@@ -18,15 +18,54 @@ public Go APIs. Placement rules are defined in
   restructuring. It provides typed specification artifacts, parsing, corpus
   loading, graph construction, validation, and formatted findings used by both
   planning and audit flows.
+- `pkg/profileaudit` is a public package for profile-startup audit used by
+  `cmd/agent` and catalog gates. It currently imports internal catalog, REST,
+  runtime, and support surfaces listed in `internal/boundaries/boundaries_baseline.txt`.
 - `agents/`, `tools/`, `docs/`, and `testdata/` remain configuration,
   specification, and fixture directories rather than Go package domains.
 - Each migration should preserve behavior first. Rename symbols or redesign APIs
   only in separate follow-up work.
 
+## CLI Flag Ownership
+
+A CLI flag is defined by the package that consumes it, in a `Config` struct
+with `RegisterFlags(fs *pflag.FlagSet)`. `cmd` packages register flags only for
+binary-contract concerns (profile selection, output paths, validation mode) and
+call `RegisterFlags` for everything else. Registration happens only from `cmd`;
+no package touches a flagset at import time.
+
+Flags whose resolution spans the whole binary stay in `cmd/agent`:
+
+- `--profile`
+- `--core-root`
+- `--directory`
+- `--request`
+- `--output`
+- `--child-agent-binary`
+- `--validate-config`
+
+Component-owned flags:
+
+- `internal/observability/telemetry`: `--otel-log-file`, `--otel-otlp-endpoint`,
+  `--otel-metric-otlp-endpoint`, `--otel-service-name`, `--otel-parent-span`,
+  `--telemetry-capture`, `--verbose-trace`
+- `internal/runtime/checkpoint`: `--dolt-dsn`, `--resume-checkpoint`,
+  `--resume-signal`
+- `internal/tools/dolt`: `--dolt-connection`
+
+## Builtin Factory Ownership
+
+A builtin init is registered by the package that builds the command, through a
+package-level `RegisterFactories(br, deps)` entry point. `cmd/agent` supplies
+`FactoryDeps` and never registers an init directly. Catalog probes invoke every
+registrar against a throwaway registry, so registrars must be side-effect-free
+apart from `br.Register` calls.
+
 ## Target Domains
 
 - `internal/runtime`: agent loop runtime, state machines, dispatch,
-  checkpoints, rollback, and workspace refs.
+  checkpoints (`internal/runtime/checkpoint` owns Dolt DSN and resume flags),
+  rollback, and workspace refs.
 - `internal/tools`: standard tool library behavior split across focused packages
   for catalog loading, registration, file, exec, lifecycle, validation, control,
   undo, REST, and LLM tool implementations.
@@ -43,19 +82,25 @@ public Go APIs. Placement rules are defined in
   helpers, and trace replay support.
 - `internal/support`: private process, workspace, and CLI helper code. This
   domain contains process execution, subprocess, worktree, and CLI utilities.
+- `internal/version`: link-time binary identity (Version, Commit, Date)
+  consumed by cmd/agent and the OTel service.version resource attribute.
 
 ## Current Go Package Inventory
 
-Generated from `go list ./...` after the internal package migration:
+Generated from `go list ./...`. The boundaries gate checks this list.
 
 - `cmd/agent`
+- `internal/boundaries`
+- `internal/doltsql`
 - `internal/evaluation`
+- `internal/gostyle`
 - `internal/model`
 - `internal/model/llm`
 - `internal/model/llm/ollama`
 - `internal/model/prompt`
 - `internal/observability`
 - `internal/observability/monitor`
+- `internal/observability/monitor/runtimeconfig`
 - `internal/observability/telemetry`
 - `internal/observability/telemetry/genai`
 - `internal/observability/tracing`
@@ -65,25 +110,47 @@ Generated from `go list ./...` after the internal package migration:
 - `internal/planning/pipeline`
 - `internal/planning/plan`
 - `internal/runtime`
+- `internal/runtime/checkpoint`
+- `internal/runtime/checkpoint/dolt`
 - `internal/runtime/core`
 - `internal/support`
-- `internal/support/cli`
+- `internal/support/corepath`
+- `internal/support/envexpand`
 - `internal/support/execute`
 - `internal/support/subprocess`
 - `internal/tools`
 - `internal/tools/catalog`
+- `internal/tools/compose`
 - `internal/tools/control`
+- `internal/tools/dolt`
 - `internal/tools/exec`
 - `internal/tools/filesystem`
 - `internal/tools/lifecycle`
 - `internal/tools/llm`
+- `internal/tools/otlp`
 - `internal/tools/registry`
 - `internal/tools/rest`
+- `internal/tools/rest/client`
+- `internal/tools/rest/credentials`
+- `internal/tools/rest/definition`
+- `internal/tools/rest/mock`
+- `internal/tools/rest/monitor`
+- `internal/tools/rest/redact`
+- `internal/tools/rest/resttest`
+- `internal/tools/rest/servercmd`
+- `internal/tools/rest/validation`
+- `internal/tools/service`
 - `internal/tools/undo`
 - `internal/tools/validation`
+- `internal/version`
+- `pkg/profileaudit`
 - `pkg/spec`
 
-`pkg/spec` is the only current public `pkg/` package.
+REST subpackages layer as definition (model and loading) under validation; the
+parent keeps collection and the server runtime on top; client, credentials,
+redact, monitor, mock, and servercmd are leaves the parent imports.
+
+Public `pkg/` packages are `pkg/spec` and `pkg/profileaudit`.
 
 ## Migration Order
 
