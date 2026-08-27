@@ -16,7 +16,10 @@ import (
 func TestRegisterFactoriesProbesExpectedInits(t *testing.T) {
 	t.Parallel()
 
-	want := []string{InitCompose, InitRenderEach, InitFlatMap, InitReorderByIndex}
+	want := []string{
+		InitCompose, InitRenderEach, InitProject, InitNormalizeVector,
+		InitFlatMap, InitReorderByIndex,
+	}
 	br := toolregistry.NewBuiltinRegistry()
 	RegisterFactories(br)
 	require.ElementsMatch(t, want, br.Names())
@@ -48,6 +51,12 @@ func TestRegisterFactoriesRejectsMalformedConfig(t *testing.T) {
 		{Name: "render_each", Type: "builtin", Init: InitRenderEach, Config: map[string]interface{}{
 			"items": "$from(v).items", "item_template": "{{ bad path }}", "signal": "Rendered",
 		}},
+		{Name: "project", Type: "builtin", Init: InitProject, Config: map[string]interface{}{
+			"items": "$from(v).items", "field": "bad..path", "signal": "Projected",
+		}},
+		{Name: "normalize_vector", Type: "builtin", Init: InitNormalizeVector, Config: map[string]interface{}{
+			"path": "bad..path", "signal": "Normalized",
+		}},
 		{Name: "flat_map", Type: "builtin", Init: InitFlatMap, Config: map[string]interface{}{
 			"items": "$from(v).items", "element_fields": map[string]string{}, "signal": "Flattened",
 		}},
@@ -76,6 +85,12 @@ func TestRegisterFactoriesAcceptsValidConfig(t *testing.T) {
 		{Name: "compose", Type: "builtin", Init: InitCompose, Config: map[string]interface{}{
 			"template": "{{ value }}", "inputs": map[string]string{"value": "$from(v).value"},
 			"signal": "Composed",
+		}},
+		{Name: "project", Type: "builtin", Init: InitProject, Config: map[string]interface{}{
+			"items": "$from(v).items", "field": "metadata.id", "signal": "Projected",
+		}},
+		{Name: "normalize_vector", Type: "builtin", Init: InitNormalizeVector, Config: map[string]interface{}{
+			"path": "mapped.embedding", "signal": "Normalized",
 		}},
 		{Name: "flat_map", Type: "builtin", Init: InitFlatMap, Config: map[string]interface{}{
 			"items": "$from(v).items", "element_fields": map[string]string{"id": "ids.0"},
