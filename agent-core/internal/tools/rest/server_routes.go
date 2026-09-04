@@ -74,7 +74,7 @@ var allowedUndeclaredHeaders = map[string]bool{
 	"cache-control": true, "connection": true,
 	"content-length": true, "content-type": true,
 	"cookie": true, "dnt": true,
-	"sec-gpc": true,
+	"sec-gpc":           true,
 	"host":              true,
 	"if-modified-since": true, "if-none-match": true,
 	"origin": true,
@@ -413,6 +413,11 @@ func (r *serverRuntime) serveStaticAssets(w http.ResponseWriter, req *http.Reque
 		return
 	}
 	defer func() { _ = f.Close() }()
+	// Without a cache policy browsers cache heuristically on Last-Modified,
+	// and a SPA keeps running its old bundle after a redeploy until a hard
+	// reload. no-cache forces revalidation, which ServeContent answers with
+	// cheap 304s, so a normal reload always runs the deployed page (GH-1939).
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeContent(w, req, info.Name(), info.ModTime(), f)
 }
 
