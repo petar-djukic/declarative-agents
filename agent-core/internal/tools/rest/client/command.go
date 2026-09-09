@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -46,6 +48,10 @@ type ClientBuilder struct {
 	AsyncState  *AsyncState
 	Credentials CredentialResolver
 	Metrics     core.MetricConfig
+	// CaptureContent records the rendered request body on the dispatch span
+	// (GH-93): an LLM invoked through a declared REST operation carries its
+	// prompt as a request body, which telemetry otherwise never sees.
+	CaptureContent bool
 }
 
 // CompensationExecutor executes REST compensation from rollback mementos.
@@ -60,7 +66,8 @@ func (b ClientBuilder) Build(res core.Result) core.Command {
 	return &clientCmd{
 		toolName: b.ToolName, init: b.Init, operation: b.Operation,
 		params: params, asyncState: b.AsyncState, credentials: b.Credentials, buildErr: err,
-		metrics: b.Metrics, definitions: b.Definitions,
+		metrics: b.Metrics, definitions: b.Definitions, captureContent: b.CaptureContent,
+		tracer: tracing.NoopTracer{},
 	}
 }
 
@@ -89,6 +96,49 @@ type clientCmd struct {
 	undoMeta     restUndoMetadata
 	commandState core.CommandStateView
 	traceCtx     oteltrace.SpanContext
+	// Content capture (GH-93): the dispatch tracer and whether to record the
+	// rendered request body on it.
+	tracer         tracing.Tracer
+	captureContent bool
+}
+
+// SetTracer receives the active dispatch tracer so a capture-enabled command
+// can record its rendered request body on its own span (core.TracerAware).
+func (c *clientCmd) SetTracer(tracer tracing.Tracer) {
+	if tracer == nil {
+		c.tracer = tracing.NoopTracer{}
+		return
+	}
+	c.tracer = tracer
+}
+
+var _ core.TracerAware = (*clientCmd)(nil)
+
+// captureBodyLimit bounds the recorded request body: enough for any prompt,
+// small enough that an embedding batch does not bloat the span.
+const captureBodyLimit = 16 * 1024
+
+// recordRequestCapture records the rendered request body on the dispatch
+// span at capture full. Credentials ride headers via auth_ref, never bodies,
+// so the body is content, not secret material.
+func (c *clientCmd) recordRequestCapture(request *http.Request) {
+	if !c.captureContent || request == nil || request.GetBody == nil {
+		return
+	}
+	reader, err := request.GetBody()
+	if err != nil {
+		return
+	}
+	defer func() { _ = reader.Close() }()
+	body, err := io.ReadAll(io.LimitReader(reader, captureBodyLimit+1))
+	if err != nil || len(body) == 0 {
+		return
+	}
+	if len(body) > captureBodyLimit {
+		body = body[:captureBodyLimit]
+		c.tracer.SetAttributes(attribute.Bool("http.request.body.truncated", true))
+	}
+	c.tracer.SetAttributes(attribute.String("http.request.body", string(body)))
 }
 
 // SetCommandState receives the read-only command-state view the engine injects
@@ -171,6 +221,7 @@ func (c *clientCmd) executeContext(ctx context.Context) core.Result {
 		return clientOperationError(c.toolName, requestBuildFailureStage(err), err, c.operation)
 	}
 	c.params = effective
+	c.recordRequestCapture(request)
 	if c.init == initSend {
 		return c.sendAsync(request)
 	}
