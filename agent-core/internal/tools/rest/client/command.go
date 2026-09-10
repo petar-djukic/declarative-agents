@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -139,6 +140,46 @@ func (c *clientCmd) recordRequestCapture(request *http.Request) {
 		c.tracer.SetAttributes(attribute.Bool("http.request.body.truncated", true))
 	}
 	c.tracer.SetAttributes(attribute.String("http.request.body", string(body)))
+}
+
+// responseCapture accumulates the response bytes the mapping reads, up to the
+// capture limit; writes never fail so the tee cannot disturb the read path.
+type responseCapture struct {
+	buf       bytes.Buffer
+	truncated bool
+}
+
+func (w *responseCapture) Write(p []byte) (int, error) {
+	remain := captureBodyLimit - w.buf.Len()
+	switch {
+	case remain >= len(p):
+		w.buf.Write(p)
+	case remain > 0:
+		w.buf.Write(p[:remain])
+		w.truncated = true
+	case len(p) > 0:
+		w.truncated = true
+	}
+	return len(p), nil
+}
+
+// teeReadCloser reads through the tee while closing the original body, so the
+// capture wrap keeps the response's own close semantics.
+type teeReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// recordResponseCapture records the captured response body on the dispatch
+// span at capture full, mirroring recordRequestCapture on the request side.
+func (c *clientCmd) recordResponseCapture(capture *responseCapture) {
+	if capture == nil || capture.buf.Len() == 0 {
+		return
+	}
+	if capture.truncated {
+		c.tracer.SetAttributes(attribute.Bool("http.response.body.truncated", true))
+	}
+	c.tracer.SetAttributes(attribute.String("http.response.body", capture.buf.String()))
 }
 
 // SetCommandState receives the read-only command-state view the engine injects
@@ -352,7 +393,17 @@ func (c *clientCmd) executeRequest(request *http.Request) core.Result {
 		return result
 	}
 	defer func() { _ = response.Body.Close() }()
+	// At capture full the dispatch span records what the mapping reads of the
+	// response body, bounded like the request capture (GH-95). The tee sees
+	// only consumed bytes, so an oversize response records its read prefix
+	// and a mapping failure still records what arrived.
+	var capture *responseCapture
+	if c.captureContent {
+		capture = &responseCapture{}
+		response.Body = teeReadCloser{Reader: io.TeeReader(response.Body, capture), Closer: response.Body}
+	}
 	result, err := mapClientResponse(c.toolName, c.operation, response, attempts, duration, c.params)
+	c.recordResponseCapture(capture)
 	if err != nil {
 		return result
 	}
