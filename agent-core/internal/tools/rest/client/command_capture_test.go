@@ -90,3 +90,59 @@ func TestCaptureTruncatesAtTheLimit(t *testing.T) {
 		t.Error("a body over the limit must carry the truncation marker")
 	}
 }
+
+// Response-body capture (GH-95): the tee records what the mapping reads, so
+// the dispatch span carries the model's answer for a chat operation.
+
+func teeThrough(t *testing.T, capture *responseCapture, body string) {
+	t.Helper()
+	reader := io.TeeReader(strings.NewReader(body), capture)
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("read through tee: %v", err)
+	}
+}
+
+func TestResponseCaptureRecordsTheBody(t *testing.T) {
+	t.Parallel()
+	root, child := captureTracer()
+	cmd := &clientCmd{toolName: "invoke_cohere_command", captureContent: true}
+	cmd.SetTracer(child)
+	capture := &responseCapture{}
+	teeThrough(t, capture, `{"message":{"role":"assistant","content":[{"type":"text","text":"the answer"}]}}`)
+	cmd.recordResponseCapture(capture)
+	body, ok := capturedAttr(root, "http.response.body")
+	if !ok || !strings.Contains(body, "the answer") {
+		t.Errorf("http.response.body = %q (present=%v), want the read body", body, ok)
+	}
+	if _, truncated := capturedAttr(root, "http.response.body.truncated"); truncated {
+		t.Error("a body under the limit must not be marked truncated")
+	}
+}
+
+func TestResponseCaptureOffRecordsNothing(t *testing.T) {
+	t.Parallel()
+	root, child := captureTracer()
+	cmd := &clientCmd{toolName: "invoke_cohere_command"}
+	cmd.SetTracer(child)
+	cmd.recordResponseCapture(nil)
+	if _, ok := capturedAttr(root, "http.response.body"); ok {
+		t.Error("capture off must record no response body")
+	}
+}
+
+func TestResponseCaptureTruncatesAtTheLimit(t *testing.T) {
+	t.Parallel()
+	root, child := captureTracer()
+	cmd := &clientCmd{toolName: "query_embedding", captureContent: true}
+	cmd.SetTracer(child)
+	capture := &responseCapture{}
+	teeThrough(t, capture, string(bytes.Repeat([]byte("v"), captureBodyLimit+512)))
+	cmd.recordResponseCapture(capture)
+	body, ok := capturedAttr(root, "http.response.body")
+	if !ok || len(body) != captureBodyLimit {
+		t.Errorf("captured %d bytes (present=%v), want exactly the %d limit", len(body), ok, captureBodyLimit)
+	}
+	if _, truncated := capturedAttr(root, "http.response.body.truncated"); !truncated {
+		t.Error("a body over the limit must carry the truncation marker")
+	}
+}
