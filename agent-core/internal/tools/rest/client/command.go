@@ -4,13 +4,10 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -20,6 +17,7 @@ import (
 
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/monitor"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/telemetry/genai"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest/credentials"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/undo"
@@ -49,9 +47,9 @@ type ClientBuilder struct {
 	AsyncState  *AsyncState
 	Credentials CredentialResolver
 	Metrics     core.MetricConfig
-	// CaptureContent records the rendered request body on the dispatch span
-	// (GH-93): an LLM invoked through a declared REST operation carries its
-	// prompt as a request body, which telemetry otherwise never sees.
+	// CaptureContent records redacted request and response bodies on the
+	// dispatch span, from the composition root's --telemetry-capture=full
+	// (srd028 R9.5).
 	CaptureContent bool
 }
 
@@ -67,8 +65,8 @@ func (b ClientBuilder) Build(res core.Result) core.Command {
 	return &clientCmd{
 		toolName: b.ToolName, init: b.Init, operation: b.Operation,
 		params: params, asyncState: b.AsyncState, credentials: b.Credentials, buildErr: err,
-		metrics: b.Metrics, definitions: b.Definitions, captureContent: b.CaptureContent,
-		tracer: tracing.NoopTracer{},
+		metrics: b.Metrics, definitions: b.Definitions,
+		capture: newBodyCapture(b.CaptureContent),
 	}
 }
 
@@ -97,89 +95,7 @@ type clientCmd struct {
 	undoMeta     restUndoMetadata
 	commandState core.CommandStateView
 	traceCtx     oteltrace.SpanContext
-	// Content capture (GH-93): the dispatch tracer and whether to record the
-	// rendered request body on it.
-	tracer         tracing.Tracer
-	captureContent bool
-}
-
-// SetTracer receives the active dispatch tracer so a capture-enabled command
-// can record its rendered request body on its own span (core.TracerAware).
-func (c *clientCmd) SetTracer(tracer tracing.Tracer) {
-	if tracer == nil {
-		c.tracer = tracing.NoopTracer{}
-		return
-	}
-	c.tracer = tracer
-}
-
-var _ core.TracerAware = (*clientCmd)(nil)
-
-// captureBodyLimit bounds the recorded request body: enough for any prompt,
-// small enough that an embedding batch does not bloat the span.
-const captureBodyLimit = 16 * 1024
-
-// recordRequestCapture records the rendered request body on the dispatch
-// span at capture full. Credentials ride headers via auth_ref, never bodies,
-// so the body is content, not secret material.
-func (c *clientCmd) recordRequestCapture(request *http.Request) {
-	if !c.captureContent || request == nil || request.GetBody == nil {
-		return
-	}
-	reader, err := request.GetBody()
-	if err != nil {
-		return
-	}
-	defer func() { _ = reader.Close() }()
-	body, err := io.ReadAll(io.LimitReader(reader, captureBodyLimit+1))
-	if err != nil || len(body) == 0 {
-		return
-	}
-	if len(body) > captureBodyLimit {
-		body = body[:captureBodyLimit]
-		c.tracer.SetAttributes(attribute.Bool("http.request.body.truncated", true))
-	}
-	c.tracer.SetAttributes(attribute.String("http.request.body", string(body)))
-}
-
-// responseCapture accumulates the response bytes the mapping reads, up to the
-// capture limit; writes never fail so the tee cannot disturb the read path.
-type responseCapture struct {
-	buf       bytes.Buffer
-	truncated bool
-}
-
-func (w *responseCapture) Write(p []byte) (int, error) {
-	remain := captureBodyLimit - w.buf.Len()
-	switch {
-	case remain >= len(p):
-		w.buf.Write(p)
-	case remain > 0:
-		w.buf.Write(p[:remain])
-		w.truncated = true
-	case len(p) > 0:
-		w.truncated = true
-	}
-	return len(p), nil
-}
-
-// teeReadCloser reads through the tee while closing the original body, so the
-// capture wrap keeps the response's own close semantics.
-type teeReadCloser struct {
-	io.Reader
-	io.Closer
-}
-
-// recordResponseCapture records the captured response body on the dispatch
-// span at capture full, mirroring recordRequestCapture on the request side.
-func (c *clientCmd) recordResponseCapture(capture *responseCapture) {
-	if capture == nil || capture.buf.Len() == 0 {
-		return
-	}
-	if capture.truncated {
-		c.tracer.SetAttributes(attribute.Bool("http.response.body.truncated", true))
-	}
-	c.tracer.SetAttributes(attribute.String("http.response.body", capture.buf.String()))
+	capture      bodyCapture
 }
 
 // SetCommandState receives the read-only command-state view the engine injects
@@ -189,6 +105,13 @@ func (c *clientCmd) recordResponseCapture(capture *responseCapture) {
 func (c *clientCmd) SetCommandState(view core.CommandStateView) { c.commandState = view }
 
 var _ core.CommandStateAware = (*clientCmd)(nil)
+
+// SetTracer receives the dispatch child tracer the engine injects before
+// dispatch, so a capture-enabled command records its bodies on its own span
+// (srd028 R9.5, core TracerAware).
+func (c *clientCmd) SetTracer(tracer tracing.Tracer) { c.capture.setTracer(tracer) }
+
+var _ core.TracerAware = (*clientCmd)(nil)
 
 // SetTraceContext receives the active dispatch span the engine injects before
 // dispatch, so outbound requests carry its W3C trace context (srd016 R4, core
@@ -262,7 +185,6 @@ func (c *clientCmd) executeContext(ctx context.Context) core.Result {
 		return clientOperationError(c.toolName, requestBuildFailureStage(err), err, c.operation)
 	}
 	c.params = effective
-	c.recordRequestCapture(request)
 	if c.init == initSend {
 		return c.sendAsync(request)
 	}
@@ -377,6 +299,7 @@ func stringOutputField(output map[string]interface{}, key string) string {
 }
 
 func (c *clientCmd) executeRequest(request *http.Request) core.Result {
+	c.capture.recordRequest(request, clientRedactionSelectors(c.operation, c.operation.Operation.Success))
 	start := time.Now()
 	response, attempts, err := c.doWithRetry(request)
 	duration := time.Since(start)
@@ -393,17 +316,9 @@ func (c *clientCmd) executeRequest(request *http.Request) core.Result {
 		return result
 	}
 	defer func() { _ = response.Body.Close() }()
-	// At capture full the dispatch span records what the mapping reads of the
-	// response body, bounded like the request capture (GH-95). The tee sees
-	// only consumed bytes, so an oversize response records its read prefix
-	// and a mapping failure still records what arrived.
-	var capture *responseCapture
-	if c.captureContent {
-		capture = &responseCapture{}
-		response.Body = teeReadCloser{Reader: io.TeeReader(response.Body, capture), Closer: response.Body}
-	}
-	result, err := mapClientResponse(c.toolName, c.operation, response, attempts, duration, c.params)
-	c.recordResponseCapture(capture)
+	result, err := mapClientResponse(
+		c.toolName, c.operation, response, attempts, duration, c.params, c.capture,
+	)
 	if err != nil {
 		return result
 	}

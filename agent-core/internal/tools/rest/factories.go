@@ -51,8 +51,9 @@ type FactoryDeps struct {
 	Monitor            MonitorState
 	RunID              string
 	CredentialResolver credentials.Resolver
-	// CaptureContent turns on request-body recording on client dispatch
-	// spans (GH-93), from the composition root's --telemetry-capture=full.
+	// CaptureContent turns on request and response body recording on client
+	// dispatch spans, from the composition root's --telemetry-capture=full
+	// (srd028 R9.5).
 	CaptureContent bool
 }
 

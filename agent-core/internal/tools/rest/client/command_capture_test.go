@@ -1,148 +1,218 @@
 // Copyright (c) 2026 Nokia
 // SPDX-License-Identifier: BSD-3-Clause
 
-package client
+package client_test
 
 import (
-	"bytes"
-	"fmt"
-	"io"
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/observability/tracing"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
+	toolrest "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest"
 )
 
-// Request-body capture (GH-93): at telemetry capture full, the dispatch span
-// records the rendered request body — the prompt, when the operation invokes
-// an LLM over REST — truncated so an embedding batch cannot bloat the span.
+// captureTracer accumulates every attribute set on the dispatch span, unlike a
+// last-write-wins double: one capture sets its body and its truncation flag in
+// separate calls.
+type captureTracer struct{ attributes []attribute.KeyValue }
 
-func requestWithBody(t *testing.T, body string) *http.Request {
+func (c *captureTracer) Push(string, ...attribute.KeyValue) (tracing.Tracer, func()) {
+	return c, func() {}
+}
+
+func (*captureTracer) Event(string, ...attribute.KeyValue) {}
+
+func (c *captureTracer) SetAttributes(attrs ...attribute.KeyValue) {
+	c.attributes = append(c.attributes, attrs...)
+}
+
+func (*captureTracer) RecordError(error) {}
+
+func (*captureTracer) Context() context.Context { return context.Background() }
+
+func (c *captureTracer) value(key string) (attribute.Value, bool) {
+	for _, attr := range c.attributes {
+		if string(attr.Key) == key {
+			return attr.Value, true
+		}
+	}
+	return attribute.Value{}, false
+}
+
+func (c *captureTracer) body(t *testing.T, key string) map[string]interface{} {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, "https://api.cohere.com/v2/chat", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	request.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader(body)), nil
-	}
-	return request
+	value, ok := c.value(key)
+	require.Truef(t, ok, "expected attribute %s on the dispatch span", key)
+	decoded := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal([]byte(value.AsString()), &decoded))
+	return decoded
 }
 
-func capturedAttr(tracer *tracing.RecordingTracer, key string) (string, bool) {
-	if len(tracer.Spans) == 0 {
-		return "", false
-	}
-	value, ok := tracer.Spans[0].SetAttrs[key]
-	if !ok {
-		return "", false
-	}
-	return fmt.Sprintf("%v", value), true
-}
-
-// captureTracer returns a recorder plus the child tracer a dispatch would
-// inject, since SetAttributes lands on the active span, not the root.
-func captureTracer() (*tracing.RecordingTracer, tracing.Tracer) {
-	root := tracing.NewRecordingTracer()
-	child, _ := root.Push("execute_tool test")
-	return root, child
-}
-
-func TestCaptureOnRecordsTheRequestBody(t *testing.T) {
-	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "invoke_cohere_command", captureContent: true}
-	cmd.SetTracer(child)
-	cmd.recordRequestCapture(requestWithBody(t, `{"messages":[{"role":"user","content":"the prompt"}]}`))
-	body, ok := capturedAttr(root, "http.request.body")
-	if !ok || !strings.Contains(body, "the prompt") {
-		t.Errorf("http.request.body = %q (present=%v), want the rendered body", body, ok)
-	}
-	if _, truncated := capturedAttr(root, "http.request.body.truncated"); truncated {
-		t.Error("a body under the limit must not be marked truncated")
-	}
-}
-
-func TestCaptureOffRecordsNothing(t *testing.T) {
-	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "invoke_cohere_command"}
-	cmd.SetTracer(child)
-	cmd.recordRequestCapture(requestWithBody(t, `{"messages":[]}`))
-	if _, ok := capturedAttr(root, "http.request.body"); ok {
-		t.Error("capture off must record no request body")
-	}
-}
-
-func TestCaptureTruncatesAtTheLimit(t *testing.T) {
-	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "rag_query", captureContent: true}
-	cmd.SetTracer(child)
-	large := string(bytes.Repeat([]byte("x"), captureBodyLimit+512))
-	cmd.recordRequestCapture(requestWithBody(t, large))
-	body, ok := capturedAttr(root, "http.request.body")
-	if !ok || len(body) != captureBodyLimit {
-		t.Errorf("captured %d bytes (present=%v), want exactly the %d limit", len(body), ok, captureBodyLimit)
-	}
-	if _, truncated := capturedAttr(root, "http.request.body.truncated"); !truncated {
-		t.Error("a body over the limit must carry the truncation marker")
-	}
-}
-
-// Response-body capture (GH-95): the tee records what the mapping reads, so
-// the dispatch span carries the model's answer for a chat operation.
-
-func teeThrough(t *testing.T, capture *responseCapture, body string) {
+// captureCommand builds a client command at the given capture setting and
+// injects a recording tracer the way core.Dispatch injects the real one.
+func captureCommand(
+	t *testing.T,
+	def Definition,
+	init string,
+	operation string,
+	input map[string]interface{},
+	capture bool,
+) (core.Command, *captureTracer) {
 	t.Helper()
-	reader := io.TeeReader(strings.NewReader(body), capture)
-	if _, err := io.ReadAll(reader); err != nil {
-		t.Fatalf("read through tee: %v", err)
+	collection := toolrest.NewCollection()
+	require.NoError(t, collection.Add(def))
+	resolved, err := collection.ResolveClientOperation(toolrest.ClientToolConfig{
+		RestRef: "github", Resource: "issue", Operation: operation,
+	})
+	require.NoError(t, err)
+	params, err := json.Marshal(map[string]interface{}{"tool": init, "parameters": input})
+	require.NoError(t, err)
+	cmd := ClientBuilder{
+		ToolName: init, Init: init, Operation: resolved, CaptureContent: capture,
+	}.Build(core.Result{Output: string(params)})
+	tracer := &captureTracer{}
+	aware, ok := cmd.(core.TracerAware)
+	require.True(t, ok, "client command must accept the dispatch tracer")
+	aware.SetTracer(tracer)
+	return cmd, tracer
+}
+
+// secretBodyDefinition gives the set operation a request body carrying a field
+// the operation already declares redacted, so capture has something to hide on
+// both sides of the call.
+func secretBodyDefinition(t *testing.T, baseURL string) Definition {
+	t.Helper()
+	client := issueClient()
+	op := client.Resources["issue"].Operations["set"]
+	op.Body = map[string]interface{}{
+		"title":  "{{ params.title }}",
+		"secret": "request-secret",
+	}
+	client.Resources["issue"].Operations["set"] = op
+	return clientDefinition(t, baseURL, client)
+}
+
+func TestRESTCaptureRecordsBothBodiesAtFull(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"title":"ok","id":"7"}`))
+	}))
+	defer upstream.Close()
+
+	cmd, tracer := captureCommand(
+		t, clientDefinition(t, upstream.URL, issueClient()),
+		InitClientSet, "set", params("1", "new title"), true,
+	)
+	require.Equal(t, core.Signal("RESTResourceWritten"), cmd.Execute().Signal)
+
+	require.Equal(t, "new title", tracer.body(t, "http.request.body")["title"])
+	require.Equal(t, "ok", tracer.body(t, "http.response.body")["title"])
+}
+
+func TestRESTCaptureRecordsNothingBelowFull(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"title":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	cmd, tracer := captureCommand(
+		t, clientDefinition(t, upstream.URL, issueClient()),
+		InitClientSet, "set", params("1", "new title"), false,
+	)
+	require.Equal(t, core.Signal("RESTResourceWritten"), cmd.Execute().Signal)
+
+	for _, key := range []string{
+		"http.request.body", "http.response.body",
+		"http.request.body.truncated", "http.response.body.truncated",
+	} {
+		_, ok := tracer.value(key)
+		require.Falsef(t, ok, "capture off and delta must not set %s", key)
 	}
 }
 
-func TestResponseCaptureRecordsTheBody(t *testing.T) {
+func TestRESTCaptureAppliesDeclaredRedaction(t *testing.T) {
 	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "invoke_cohere_command", captureContent: true}
-	cmd.SetTracer(child)
-	capture := &responseCapture{}
-	teeThrough(t, capture, `{"message":{"role":"assistant","content":[{"type":"text","text":"the answer"}]}}`)
-	cmd.recordResponseCapture(capture)
-	body, ok := capturedAttr(root, "http.response.body")
-	if !ok || !strings.Contains(body, "the answer") {
-		t.Errorf("http.response.body = %q (present=%v), want the read body", body, ok)
-	}
-	if _, truncated := capturedAttr(root, "http.response.body.truncated"); truncated {
-		t.Error("a body under the limit must not be marked truncated")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"title":"ok","secret":"response-secret"}`))
+	}))
+	defer upstream.Close()
+
+	cmd, tracer := captureCommand(
+		t, secretBodyDefinition(t, upstream.URL),
+		InitClientSet, "set", params("1", "new title"), true,
+	)
+	require.Equal(t, core.Signal("RESTResourceWritten"), cmd.Execute().Signal)
+
+	// Assert the redacted marker, not merely absence: a missing key would
+	// satisfy a NotEqual while proving nothing about redaction running.
+	request := tracer.body(t, "http.request.body")
+	require.Equal(t, "new title", request["title"])
+	require.Equal(t, "[REDACTED]", request["secret"])
+
+	response := tracer.body(t, "http.response.body")
+	require.Equal(t, "ok", response["title"])
+	require.Equal(t, "[REDACTED]", response["secret"])
+
+	for _, attr := range tracer.attributes {
+		require.NotContains(t, attr.Value.AsString(), "request-secret")
+		require.NotContains(t, attr.Value.AsString(), "response-secret")
 	}
 }
 
-func TestResponseCaptureOffRecordsNothing(t *testing.T) {
+func TestRESTCaptureSkipsNonJSONResponseBody(t *testing.T) {
 	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "invoke_cohere_command"}
-	cmd.SetTracer(child)
-	cmd.recordResponseCapture(nil)
-	if _, ok := capturedAttr(root, "http.response.body"); ok {
-		t.Error("capture off must record no response body")
-	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("plain text, not an object"))
+	}))
+	defer upstream.Close()
+
+	cmd, tracer := captureCommand(
+		t, clientDefinition(t, upstream.URL, issueClient()),
+		InitClientSet, "set", params("1", "new title"), true,
+	)
+	cmd.Execute()
+
+	_, ok := tracer.value("http.response.body")
+	require.False(t, ok, "a body that is not a JSON object cannot be redacted, so it is not captured")
+	require.Equal(t, "new title", tracer.body(t, "http.request.body")["title"])
 }
 
-func TestResponseCaptureTruncatesAtTheLimit(t *testing.T) {
+func TestRESTCaptureTruncatesOversizedBody(t *testing.T) {
 	t.Parallel()
-	root, child := captureTracer()
-	cmd := &clientCmd{toolName: "query_embedding", captureContent: true}
-	cmd.SetTracer(child)
-	capture := &responseCapture{}
-	teeThrough(t, capture, string(bytes.Repeat([]byte("v"), captureBodyLimit+512)))
-	cmd.recordResponseCapture(capture)
-	body, ok := capturedAttr(root, "http.response.body")
-	if !ok || len(body) != captureBodyLimit {
-		t.Errorf("captured %d bytes (present=%v), want exactly the %d limit", len(body), ok, captureBodyLimit)
-	}
-	if _, truncated := capturedAttr(root, "http.response.body.truncated"); !truncated {
-		t.Error("a body over the limit must carry the truncation marker")
-	}
+	oversized, err := json.Marshal(map[string]interface{}{
+		"title": strings.Repeat("x", 20000),
+	})
+	require.NoError(t, err)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(oversized)
+	}))
+	defer upstream.Close()
+
+	cmd, tracer := captureCommand(
+		t, clientDefinition(t, upstream.URL, issueClient()),
+		InitClientSet, "set", params("1", "new title"), true,
+	)
+	require.Equal(t, core.Signal("RESTResourceWritten"), cmd.Execute().Signal)
+
+	truncated, ok := tracer.value("http.response.body.truncated")
+	require.True(t, ok, "an oversized body must be flagged truncated")
+	require.True(t, truncated.AsBool())
+
+	recorded, ok := tracer.value("http.response.body")
+	require.True(t, ok)
+	require.Len(t, recorded.AsString(), 16384)
 }
