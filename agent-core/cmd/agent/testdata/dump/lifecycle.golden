@@ -4,10 +4,10 @@ profile:
   machine: <agent-core>/testdata/integration/profiles/lifecycle/machine.yaml
   tools:
     - <agent-core>/testdata/integration/profiles/lifecycle/tools.yaml
-  tool_declarations: []
-  tool_config_dirs:
-    - <agent-core>/tools/builtin/lifecycle
-    - <agent-core>/tools/builtin/llm
+  tool_declarations:
+    - <agent-core>/tools/builtin/lifecycle/exit-agent.yaml
+    - <agent-core>/tools/builtin/suspend.yaml
+    - <agent-core>/tools/builtin/done.yaml
 machine:
   name: core-lifecycle-approval
   purpose: Prove suspend and resume through Agent Core lifecycle ports.
@@ -70,26 +70,48 @@ machine:
   budget:
     max_iterations: 5
     command_timeout: 1m
+types:
+  - ref: builtin-types-core.AnyValue
+    description: Any JSON value accepted by the schema configured on the word.
+    schema:
+      description: The runtime value is any JSON value accepted by the configured schema.
+  - ref: builtin-types-core.CommandSummary
+    description: The message and outcome signal a command word publishes.
+    schema:
+      properties:
+        message:
+          type: string
+        signal:
+          type: string
+      required:
+        - message
+      type: object
+  - ref: builtin-types-core.NoParameters
+    description: The empty parameter object of a word whose input arrives through config selectors.
+    schema:
+      properties: {}
+      type: object
+  - ref: builtin-types-core.Text
+    description: Plain text a word publishes as its whole result.
+    schema:
+      type: string
 tools:
   - name: done
     type: builtin
     category: word
     description: Signal that the generation task is complete.
-    problem: The machine needs a declared word for declaring task completion without embedding that workflow step in Go control flow.
+    problem: Signal that the generation task is complete.
     goals:
-      - Perform the done action as one machine-selected word.
-      - Return an explicit signal that lets the MachineSpec choose the next state.
-      - Keep sequencing outside the tool implementation and in machine.yaml.
+      - Signal that the generation task is complete.
     requirements:
       input:
-        - must consume parameters from tool input, prior Result, or configured command/domain state
+        - done declares no input type
       output:
-        - must emit one declared signal and return machine-readable output when available
+        - done takes its output as builtin-types-core.CommandSummary
       errors:
-        - must emit CommandError for infrastructure failures and preserve domain failures as declared signals
+        - done emits CommandError when it cannot produce its declared output
     non_goals:
-      - Does not choose the next workflow step; machine.yaml owns sequencing.
-      - Does not hide unrelated tool execution behind this word.
+      - Behavior outside done, which its signature states in full
     output:
       description: done command result summary.
       schema:
@@ -103,12 +125,13 @@ tools:
         type: object
     side_effects:
       - kind: none
-        description: Emits TaskCompleted and does not mutate state.
+        state: read_only
+        description: done computes a value and mutates nothing
     reversibility:
       classification: reversible
     undo:
       strategy: noop
-      description: Completion signaling has no effects to reverse.
+      description: done mutates nothing, so undo does nothing
     errors:
       - signal: CommandError
         condition: required input, configuration, or runtime state is invalid
@@ -122,6 +145,10 @@ tools:
     init: done
     emits:
       - TaskCompleted
+    signature:
+      output: builtin-types-core.CommandSummary
+      emits:
+        - TaskCompleted
     visibility: internal
   - name: suspend
     type: builtin
@@ -197,30 +224,14 @@ files:
   - path: <agent-core>/testdata/integration/profiles/lifecycle/machine.yaml
     sha256: 4a0eb71a3489108416150f53ea49e8d85b91c0dea22af8b4163dfadff215d4e0
   - path: <agent-core>/testdata/integration/profiles/lifecycle/profile.yaml
-    sha256: 40f16017d1c2a1b0b3a46a18b4800d8e6e77a5912ab6b86e51dd371103a1c906
+    sha256: 83ef6c0f58c750bc0a75a52e8730501298bba657ae386a5b077478fa821e0830
   - path: <agent-core>/testdata/integration/profiles/lifecycle/tools.yaml
     sha256: a3be02c2c7c96a9b5fca8dcea06f9f782f77ec97d80ffc74fc6281295904d7d2
-  - path: <agent-core>/tools/builtin/checkpoint-history.yaml
-    sha256: b785e62a2994848219d72c47761b7985228e5d98ab1a5da51bf4b4f8120e2578
-  - path: <agent-core>/tools/builtin/checkpoint-rollback.yaml
-    sha256: 709b9e4d290fafbabb02f7dbdad147d6f36c426ebb6235d75c26edb0816957c0
   - path: <agent-core>/tools/builtin/done.yaml
-    sha256: 5fb63008cabb0b4ee0e3c196046af58291d8a91146e07399943b99edf62931a7
-  - path: <agent-core>/tools/builtin/lifecycle/all.yaml
-    sha256: 4b1aa21da53a0e38c8263f952296eb53e8d55f8d0f73f220667279e137702a44
+    sha256: 73bd50e42d9508b44d7c06e145c09deb3148ed8eea955d99bde0e7b76c00f435
   - path: <agent-core>/tools/builtin/lifecycle/exit-agent.yaml
     sha256: 81938b2d96dd9be01aaab2360b2e4ce7c11a22690081cf4a9e34cbabb402cf25
-  - path: <agent-core>/tools/builtin/llm/all.yaml
-    sha256: 2b323d89df64acde868987bd04b82a48408f250769f27a18eee7c57d2c20e17a
-  - path: <agent-core>/tools/builtin/nudge-reread.yaml
-    sha256: 1b02746026bf3cc6d00d952f8b36166410f6560040fd809595d362a8710fe765
-  - path: <agent-core>/tools/builtin/parse-response.yaml
-    sha256: d5909f7fafcb770ca5defc425995057643594bcb36e2b0768f9e49594db0eb67
-  - path: <agent-core>/tools/builtin/parse-structured.yaml
-    sha256: 10a39dfe608918302ab58d853ef5eb739fd40ca4704e8d41ecc91a5166daaec3
-  - path: <agent-core>/tools/builtin/report-parse-error.yaml
-    sha256: 71e0516b5e44affbea2302e34dbfeb0f3e3b1fff649edb0f3921d76d9f4a7a25
-  - path: <agent-core>/tools/builtin/reset-history.yaml
-    sha256: 773bfaaffc2fe93e683eef4ac7860369e8c6778ea0b3d01855604dbdde5df691
   - path: <agent-core>/tools/builtin/suspend.yaml
-    sha256: e82b60cb1f450d3c9493fa03dc38e40379710d7561b3c8a3fb0c5fde3c43b858
+    sha256: 917023417eef2105abb3515ef2b0f35953b49e9a0e2d761cd7c98ed131dd6f48
+  - path: <agent-core>/tools/units/types-core.yaml
+    sha256: 23b9182ef09b4feb01cf6c9438cdea033e526ea6bbee4012d0fce7a10163329b

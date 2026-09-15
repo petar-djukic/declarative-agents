@@ -78,27 +78,27 @@ func TestCorpusReachesEveryDeclaredWord(t *testing.T) {
 	require.Len(t, corpus.ToolDeclarations, len(onDisk))
 }
 
-// TestCorpusResolvesIncludes covers GH-1525 AC2: the corpus loader and the
-// runtime catalog loader must agree about what an includes-only file declares.
+// TestCorpusResolvesImports covers GH-1525 AC2: the corpus loader and the
+// runtime catalog loader must agree about what an imports-only file declares.
 // tools/builtin/all.yaml declares no tools of its own; every word it contributes
-// arrives through an include.
-func TestCorpusResolvesIncludes(t *testing.T) {
+// arrives through an import.
+func TestCorpusResolvesImports(t *testing.T) {
 	root := repoAgentCoreRoot(t)
 	allPath := filepath.Join(root, "tools", "builtin", "all.yaml")
 
 	data, err := os.ReadFile(allPath)
 	require.NoError(t, err)
 	var file struct {
-		Includes []string `yaml:"includes"`
-		Tools    []any    `yaml:"tools"`
+		Imports []string `yaml:"imports"`
+		Tools   []any    `yaml:"tools"`
 	}
 	require.NoError(t, yaml.Unmarshal(data, &file))
 	require.Empty(t, file.Tools, "all.yaml is expected to declare no tools directly")
-	require.NotEmpty(t, file.Includes, "all.yaml is expected to be an includes bundle")
+	require.NotEmpty(t, file.Imports, "all.yaml is expected to be an imports bundle")
 
 	loaded, err := catalog.LoadToolDeclarationsWithOptions(
 		[]string{allPath},
-		catalog.LoadOptions{TolerateMissingIncludes: true, ExpandEnv: false},
+		catalog.LoadOptions{ExpandEnv: false},
 		nil,
 	)
 	require.NoError(t, err)
@@ -117,41 +117,41 @@ func TestCorpusResolvesIncludes(t *testing.T) {
 // TestCorpusIncludeDiamondIsNotACycle covers a regression the first
 // implementation had: two branches reaching the same file is legal, and only an
 // ancestor chain is a cycle.
-func TestCorpusIncludeDiamondIsNotACycle(t *testing.T) {
+func TestCorpusImportDiamondIsNotACycle(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
 		path := filepath.Join(dir, name)
 		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 		return path
 	}
-	write("leaf.yaml", "tools:\n  - {name: leaf_word, binary: echo}\n")
-	write("left.yaml", "includes: [leaf.yaml]\ntools: []\n")
-	write("right.yaml", "includes: [leaf.yaml]\ntools: []\n")
-	top := write("top.yaml", "includes: [left.yaml, right.yaml]\ntools: []\n")
+	write("leaf.yaml", "unit: leaf\ntools:\n  - {name: leaf_word, binary: echo}\n")
+	write("left.yaml", "unit: left\nimports: [leaf.yaml]\ntools: []\n")
+	write("right.yaml", "unit: right\nimports: [leaf.yaml]\ntools: []\n")
+	top := write("top.yaml", "unit: top\nimports: [left.yaml, right.yaml]\ntools: []\n")
 
 	loaded, err := catalog.LoadToolDeclarationsWithOptions(
 		[]string{top},
-		catalog.LoadOptions{TolerateMissingIncludes: true, ExpandEnv: false},
+		catalog.LoadOptions{ExpandEnv: false},
 		nil,
 	)
-	require.NoError(t, err, "a diamond include must not be reported as a cycle")
+	require.NoError(t, err, "a diamond import must not be reported as a cycle")
 	require.NotEmpty(t, loaded)
 }
 
-func TestCorpusIncludeCycleIsRejected(t *testing.T) {
+func TestCorpusImportCycleIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	aPath := filepath.Join(dir, "a.yaml")
 	bPath := filepath.Join(dir, "b.yaml")
-	require.NoError(t, os.WriteFile(aPath, []byte("includes: [b.yaml]\ntools: []\n"), 0o600))
-	require.NoError(t, os.WriteFile(bPath, []byte("includes: [a.yaml]\ntools: []\n"), 0o600))
+	require.NoError(t, os.WriteFile(aPath, []byte("unit: a\nimports: [b.yaml]\ntools: []\n"), 0o600))
+	require.NoError(t, os.WriteFile(bPath, []byte("unit: b\nimports: [a.yaml]\ntools: []\n"), 0o600))
 
 	_, err := catalog.LoadToolDeclarationsWithOptions(
 		[]string{aPath},
-		catalog.LoadOptions{TolerateMissingIncludes: true, ExpandEnv: false},
+		catalog.LoadOptions{ExpandEnv: false},
 		nil,
 	)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "circular include detected")
+	require.Contains(t, err.Error(), "tool import cycle")
 }
 
 func TestCorpusToolLoadingHasNoSecondYAMLParser(t *testing.T) {
@@ -248,8 +248,10 @@ func TestContractBaselineRatchet(t *testing.T) {
 
 	t.Run("a word whose missing fields changed is an error", func(t *testing.T) {
 		if len(gaps) == 0 {
+			// Dropping the signature is what changes a signed word's missing
+			// set: the prose blocks it discharges stay defaulted either way.
 			partial := completeToolDeclaration("changed_word")
-			partial.NonGoals = nil
+			partial.Signature = nil
 			finding, produced := compareContractToBaseline(
 				"changed_word", partial, []string{"goals"}, true,
 			)
@@ -260,7 +262,7 @@ func TestContractBaselineRatchet(t *testing.T) {
 		scoped := cloneCorpusForBaselineTest(corpus)
 		changed := gaps[0].Tool
 		partial := completeToolDeclaration(changed)
-		partial.NonGoals = nil
+		partial.Signature = nil
 		scoped.ToolDeclarations[changed] = partial
 
 		require.Contains(t, baselineCheckNames(scoped), "tool-contract-baseline-drift")
