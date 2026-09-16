@@ -23,6 +23,7 @@ import (
 // than present and empty, so a caller cannot confuse untyped with empty.
 func LabelTypes(
 	spec core.MachineSpec, defs []ToolDef, registry *typesys.Registry,
+	operations RESTOperations,
 ) map[string]map[string]any {
 	byName := make(map[string]ToolDef, len(defs))
 	for _, def := range defs {
@@ -35,9 +36,45 @@ func LabelTypes(
 		}
 	}
 	for _, transition := range spec.Transitions {
-		addTransitionLabelTypes(types, transition, byName, registry)
+		addTransitionLabelTypes(types, transition, byName, registry, operations)
+	}
+	// Item labels come second: for_each.items names a label that any
+	// transition may publish, earlier or later in the list.
+	for _, transition := range spec.Transitions {
+		addItemLabelType(types, transition)
 	}
 	return types
+}
+
+// addItemLabelType gives a for_each item label the element type of the array
+// its items selector reaches (srd038 R2.16). The array is the one named by
+// for_each.items, not the per-item action's output: the action runs once per
+// element and returns whatever it returns, which says nothing about the
+// elements it was handed (GH-2067).
+//
+// An items selector reaching an undecided value leaves the item untyped. A
+// REST client's mapped fields are undecided under R2.19, so iterating one
+// publishes an untyped item.
+func addItemLabelType(types map[string]map[string]any, transition core.TransitionSpec) {
+	forEach := transition.ForEach
+	if forEach == nil || forEach.As == "" {
+		return
+	}
+	parsed, ok := core.ParseSelector(forEach.Items)
+	if !ok || parsed.Label == "" {
+		return
+	}
+	collection, typed := types[parsed.Label]
+	if !typed {
+		return
+	}
+	array, decided := typesys.SchemaAt(collection, parsed.Path)
+	if !decided {
+		return
+	}
+	if items, isArray := arrayItems(array); isArray {
+		types[forEach.As] = items
+	}
 }
 
 func addTransitionLabelTypes(
@@ -45,12 +82,13 @@ func addTransitionLabelTypes(
 	transition core.TransitionSpec,
 	byName map[string]ToolDef,
 	registry *typesys.Registry,
+	operations RESTOperations,
 ) {
 	action, ok := byName[transition.Action]
 	if !ok {
 		return
 	}
-	output := signatureOutputSchema(action)
+	output := actionOutputSchema(action, operations)
 	if len(output) == 0 {
 		return
 	}
@@ -62,11 +100,6 @@ func addTransitionLabelTypes(
 	}
 	if transition.ForEach == nil {
 		return
-	}
-	// An item label takes the element type of the array it iterates, which is
-	// the action's own output only when that output is the array.
-	if items, isArray := arrayItems(output); isArray && transition.ForEach.As != "" {
-		types[transition.ForEach.As] = items
 	}
 	if transition.ForEach.Join.Label != "" {
 		types[transition.ForEach.Join.Label] = joinEnvelope(output)
@@ -116,6 +149,20 @@ func joinEnvelope(output map[string]any) map[string]any {
 	}
 }
 
+// actionOutputSchema returns the type a label takes from its publishing
+// action: the result a REST word publishes, or the type its signature states.
+//
+// The REST case is taken from the runtime rather than from a declaration
+// because the runtime builds that result itself — from the operation the word
+// names (GH-2064), or from its own listener and queue state (GH-2065) — so a
+// signature restating it could disagree with what the word returns.
+func actionOutputSchema(def ToolDef, operations RESTOperations) map[string]any {
+	if schema, ok := restLabelSchema(def, operations); ok {
+		return schema
+	}
+	return signatureOutputSchema(def)
+}
+
 // signatureOutputSchema returns the type a label takes from its publishing
 // action, and only for an action that declares a signature.
 //
@@ -157,8 +204,9 @@ func resolvedTypeRef(ref string, registry *typesys.Registry) map[string]any {
 // signatures one tool at a time.
 func ValidateSelectorPaths(
 	spec core.MachineSpec, defs []ToolDef, registry *typesys.Registry,
+	operations RESTOperations,
 ) []core.MachineDiagnostic {
-	types := LabelTypes(spec, defs, registry)
+	types := LabelTypes(spec, defs, registry, operations)
 	var diagnostics []core.MachineDiagnostic
 	seen := map[string]struct{}{}
 	for i, transition := range spec.Transitions {
@@ -217,8 +265,9 @@ func pathDiagnostics(
 // naming every mismatch.
 func ValidateSelectorPathsStrict(
 	spec core.MachineSpec, defs []ToolDef, registry *typesys.Registry,
+	operations RESTOperations,
 ) error {
-	diagnostics := ValidateSelectorPaths(spec, defs, registry)
+	diagnostics := ValidateSelectorPaths(spec, defs, registry, operations)
 	if len(diagnostics) == 0 {
 		return nil
 	}

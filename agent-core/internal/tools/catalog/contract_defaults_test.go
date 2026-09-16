@@ -25,23 +25,10 @@ func signedToolIn(category string) ToolDef {
 	}
 }
 
-func contractFields(t *testing.T, def ToolDef) map[string]bool {
-	t.Helper()
-	missing := map[string]bool{}
-	for _, finding := range ValidateToolContracts(
-		[]ToolDef{def}, ContractValidationOptions{IncludeInternal: true},
-	) {
-		missing[finding.Field] = true
-	}
-	return missing
-}
-
 func TestSignatureDefaultsDischargeWordContract(t *testing.T) {
 	t.Parallel()
 	def := applyContractDefaults(signedToolIn("word"))
 
-	require.Empty(t, contractFields(t, def),
-		"a word tool with a signature satisfies every contract check")
 	require.Equal(t, "reversible", def.Reversibility.Classification)
 	require.Equal(t, "noop", def.Undo.Strategy)
 	require.Len(t, def.SideEffects.Items, 1)
@@ -55,24 +42,24 @@ func TestSignatureDefaultsDischargeWordContract(t *testing.T) {
 func TestSignatureDefaultsDischargeResponseContract(t *testing.T) {
 	t.Parallel()
 	def := applyContractDefaults(signedToolIn("response"))
-	require.Empty(t, contractFields(t, def))
+
+	require.Equal(t, "reversible", def.Reversibility.Classification)
+	require.Equal(t, "noop", def.Undo.Strategy)
+	require.Len(t, def.SideEffects.Items, 1)
+	require.NotEmpty(t, def.Problem)
 }
 
 // srd051 R6.9: a boundary tool states what it writes, what that costs to
-// reverse, and how, signature or not.
+// reverse, and how, signature or not. The defaults fill the descriptive blocks
+// and leave those three empty; the corpus audit in pkg/spec is what then
+// reports them missing.
 func TestSignatureNeverWaivesBoundaryObligations(t *testing.T) {
 	t.Parallel()
 	def := applyContractDefaults(signedToolIn("boundary"))
 
-	missing := contractFields(t, def)
-
-	// ValidateToolContracts does not check side_effects presence; that
-	// obligation is the corpus audit's, covered in pkg/spec. What this checker
-	// owns is reversibility and undo, and a signature does not discharge them
-	// for boundary.
-	require.True(t, missing["reversibility.classification"])
-	require.True(t, missing["undo"])
-	require.False(t, missing["problem"], "the descriptive blocks still default")
+	require.Empty(t, def.Reversibility.Classification)
+	require.Empty(t, def.Undo.Strategy)
+	require.NotEmpty(t, def.Problem, "the descriptive blocks still default")
 
 	sideEffects, reversibility, undo := SignatureDischarges("boundary")
 	require.False(t, sideEffects, "the shared table discharges nothing for boundary")
@@ -84,10 +71,8 @@ func TestSignatureDefaultsLeaveStatefulInternalSideEffectsRequired(t *testing.T)
 	t.Parallel()
 	def := applyContractDefaults(signedToolIn("stateful_internal"))
 
-	missing := contractFields(t, def)
-
-	require.False(t, missing["reversibility.classification"])
-	require.False(t, missing["undo"])
+	require.Equal(t, "reversible", def.Reversibility.Classification)
+	require.Equal(t, "noop", def.Undo.Strategy)
 
 	sideEffects, _, _ := SignatureDischarges("stateful_internal")
 	require.False(t, sideEffects,

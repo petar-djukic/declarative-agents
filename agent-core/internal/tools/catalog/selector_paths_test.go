@@ -65,7 +65,7 @@ func TestLabelTypesDerivesFromThePublishingAction(t *testing.T) {
 	registry := pathRegistry(t)
 	defs := []ToolDef{fetchTool(t, registry)}
 
-	types := LabelTypes(pathMachine(), defs, registry)
+	types := LabelTypes(pathMachine(), defs, registry, nil)
 
 	require.Contains(t, types, "fetched", "the transition label takes the action's output type")
 	require.Contains(t, types, "fetch", "so does the command name that publishes it")
@@ -77,7 +77,7 @@ func TestValidateSelectorPathsAcceptsAResolvablePath(t *testing.T) {
 	t.Parallel()
 	registry := pathRegistry(t)
 	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(fetched).text")}
-	require.Empty(t, ValidateSelectorPaths(pathMachine(), defs, registry))
+	require.Empty(t, ValidateSelectorPaths(pathMachine(), defs, registry, nil))
 }
 
 func TestValidateSelectorPathsRejectsAFieldTheTypeLacks(t *testing.T) {
@@ -85,7 +85,7 @@ func TestValidateSelectorPathsRejectsAFieldTheTypeLacks(t *testing.T) {
 	registry := pathRegistry(t)
 	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(fetched).txet")}
 
-	diagnostics := ValidateSelectorPaths(pathMachine(), defs, registry)
+	diagnostics := ValidateSelectorPaths(pathMachine(), defs, registry, nil)
 
 	require.Len(t, diagnostics, 1)
 	require.Equal(t, core.DiagnosticSelectorPathMismatch, diagnostics[0].Code)
@@ -102,7 +102,7 @@ func TestValidateSelectorPathsSkipsUntypedLabels(t *testing.T) {
 	unsigned := ToolDef{Name: "fetch", Type: "builtin", Init: "compose"}
 	defs := []ToolDef{unsigned, reportReading("$from(fetched).anything.at.all")}
 
-	require.Empty(t, ValidateSelectorPaths(pathMachine(), defs, registry))
+	require.Empty(t, ValidateSelectorPaths(pathMachine(), defs, registry, nil))
 }
 
 func TestValidateSelectorPathsChecksTypedExternalLabels(t *testing.T) {
@@ -112,7 +112,7 @@ func TestValidateSelectorPathsChecksTypedExternalLabels(t *testing.T) {
 	spec.ExternalLabels = []core.ExternalLabel{{Name: "seed", Type: "chat-types.Request"}}
 	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(seed).promt")}
 
-	diagnostics := ValidateSelectorPaths(spec, defs, registry)
+	diagnostics := ValidateSelectorPaths(spec, defs, registry, nil)
 
 	require.Len(t, diagnostics, 1)
 	require.Contains(t, diagnostics[0].Message, `closest declared field is "prompt"`)
@@ -125,28 +125,72 @@ func TestValidateSelectorPathsLeavesBareExternalLabelsUntyped(t *testing.T) {
 	spec.ExternalLabels = []core.ExternalLabel{{Name: "seed"}}
 	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(seed).whatever")}
 
-	require.Empty(t, ValidateSelectorPaths(spec, defs, registry),
+	require.Empty(t, ValidateSelectorPaths(spec, defs, registry, nil),
 		"the bare form stays untyped so existing machines are unaffected")
 }
 
-func TestValidateSelectorPathsTypesForEachItemLabel(t *testing.T) {
-	t.Parallel()
-	registry := pathRegistry(t)
+// eachMachine iterates items with a per-item action, labelling each element row.
+func eachMachine(items, action string) core.MachineSpec {
 	spec := pathMachine()
 	spec.Transitions = append(spec.Transitions, core.TransitionSpec{
-		State: "Fetched", Signal: "Each", Next: "Joined", Action: "fetch",
+		State: "Fetched", Signal: "Each", Next: "Joined", Action: action,
 		ForEach: &core.ForEachSpec{
-			Items: "$from(fetched).text", As: "row",
+			Items: items, As: "row",
 			Join: core.JoinSpec{Next: "Joined", Label: "joined"},
 		},
 	})
-	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(row).txet")}
+	return spec
+}
 
-	diagnostics := ValidateSelectorPaths(spec, defs, registry)
+// TestValidateSelectorPathsTypesForEachItemLabel is srd038 R2.16: the item
+// takes the element type of the array for_each.items reaches. The per-item
+// action here is untyped, so a type on row can only have come from the array.
+func TestValidateSelectorPathsTypesForEachItemLabel(t *testing.T) {
+	t.Parallel()
+	registry := pathRegistry(t)
+	spec := eachMachine("$from(fetched).$", "process")
+	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(row).txet"), {Name: "process"}}
+
+	diagnostics := ValidateSelectorPaths(spec, defs, registry, nil)
 
 	require.Len(t, diagnostics, 1)
 	require.Contains(t, diagnostics[0].Message, `has no field "txet"`,
 		"an item label takes the element type of the array it iterates")
+}
+
+// TestItemLabelIgnoresThePerItemActionOutput is GH-2067. The item label used to
+// take the element type of the per-item action's output, so an action that
+// happened to return an array typed every element as one of its own elements,
+// and a correct selector into the real element could fail the load.
+func TestItemLabelIgnoresThePerItemActionOutput(t *testing.T) {
+	t.Parallel()
+	registry := pathRegistry(t)
+	spec := eachMachine("$from(elsewhere).things", "fetch")
+	spec.ExternalLabels = []core.ExternalLabel{{Name: "elsewhere"}}
+	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(row).anything")}
+
+	require.Empty(t, ValidateSelectorPaths(spec, defs, registry, nil),
+		"an untyped iterated array publishes an untyped item, whatever the action returns")
+}
+
+// TestItemOverARESTMappedArrayIsUntyped records the decision on GH-2067: a REST
+// client's mapped fields are undecided under srd038 R2.19, so iterating one
+// publishes an untyped item. The mesh observer's $from(pod).status.podIP is this.
+func TestItemOverARESTMappedArrayIsUntyped(t *testing.T) {
+	t.Parallel()
+	spec := core.MachineSpec{Transitions: []core.TransitionSpec{
+		{State: "S0", Signal: "Seed", Next: "S1", Action: "discover", Label: "pods_result"},
+		{State: "S1", Signal: "ToolDone", Next: "Done", Action: "process", ForEach: &core.ForEachSpec{
+			Items: "$from(pods_result).mapped.pods", As: "pod",
+			Join: core.JoinSpec{Next: "Done", Label: "joined"},
+		}},
+		{State: "Done", Signal: "ToolDone", Next: "End", Action: "report"},
+	}}
+	defs := []ToolDef{discoverPodsTool(), {Name: "process"}, reportReading("$from(pod).status.podIP")}
+
+	require.Empty(t, ValidateSelectorPaths(spec, defs, nil, listPods()))
+	_, typed := LabelTypes(spec, defs, nil, listPods())["pod"]
+	require.False(t, typed)
 }
 
 func TestValidateSelectorPathsTypesTheJoinEnvelope(t *testing.T) {
@@ -161,7 +205,7 @@ func TestValidateSelectorPathsTypesTheJoinEnvelope(t *testing.T) {
 		},
 	})
 
-	types := LabelTypes(spec, []ToolDef{fetchTool(t, registry)}, registry)
+	types := LabelTypes(spec, []ToolDef{fetchTool(t, registry)}, registry, nil)
 
 	require.Contains(t, types, "joined")
 	// The envelope mirrors iteratorJoinResult: aggregate counts beside one
@@ -181,8 +225,44 @@ func TestValidateSelectorPathsStrictNamesEveryMismatch(t *testing.T) {
 	registry := pathRegistry(t)
 	defs := []ToolDef{fetchTool(t, registry), reportReading("$from(fetched).txet")}
 
-	err := ValidateSelectorPathsStrict(pathMachine(), defs, registry)
+	err := ValidateSelectorPathsStrict(pathMachine(), defs, registry, nil)
 
 	require.ErrorContains(t, err, "selector path mismatches")
 	require.ErrorContains(t, err, `$from(fetched).txet`)
+}
+
+// reportBindingParameter is the request-binding shape: the word takes its
+// argument from a command-state selector rather than from config.
+func reportBindingParameter(selector string) ToolDef {
+	return ToolDef{Name: "report", Parameters: map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"text": map[string]interface{}{
+				"type": "string", "positional": true, "position": 1, "source": selector,
+			},
+		},
+	}}
+}
+
+func TestValidateSelectorPathsAcceptsAResolvableParameterSource(t *testing.T) {
+	t.Parallel()
+	registry := pathRegistry(t)
+	defs := []ToolDef{fetchTool(t, registry), reportBindingParameter("$from(fetched).text")}
+	require.Empty(t, ValidateSelectorPaths(pathMachine(), defs, registry, nil))
+}
+
+// TestValidateSelectorPathsRejectsABadParameterSource is the GH-2057
+// regression for the path half: the selector was never collected, so a field
+// the type does not have went unreported.
+func TestValidateSelectorPathsRejectsABadParameterSource(t *testing.T) {
+	t.Parallel()
+	registry := pathRegistry(t)
+	defs := []ToolDef{fetchTool(t, registry), reportBindingParameter("$from(fetched).txet")}
+
+	diagnostics := ValidateSelectorPaths(pathMachine(), defs, registry, nil)
+
+	require.Len(t, diagnostics, 1)
+	require.Equal(t, core.DiagnosticSelectorPathMismatch, diagnostics[0].Code)
+	require.Equal(t, "report", diagnostics[0].Tool)
+	require.Contains(t, diagnostics[0].Message, `has no field "txet"`)
 }

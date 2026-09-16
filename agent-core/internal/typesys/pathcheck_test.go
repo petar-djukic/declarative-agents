@@ -129,3 +129,69 @@ func TestCheckPathAcceptsTheWholeOutputSelector(t *testing.T) {
 	require.Error(t, typesys.CheckPath(map[string]any{"type": "string"}, []string{"$", "a"}),
 		"only a lone $ is the whole output; a longer path names a field")
 }
+
+// TestCheckPathSkipsADescribedFieldWithNoType covers the third way a
+// declaration says it does not know a shape. A nil schema and an empty one
+// were already undecided; a schema carrying only a description reported
+// "untyped, so it has no field", which contradicted both the rule and its own
+// wording (GH-2064).
+func TestCheckPathSkipsADescribedFieldWithNoType(t *testing.T) {
+	t.Parallel()
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"body": map[string]any{"description": "the producer decides this shape"},
+		},
+	}
+	require.NoError(t, typesys.CheckPath(schema, []string{"body", "anything", "deep"}))
+}
+
+// TestCheckPathStillStopsAtADeclaredScalar keeps the relaxation narrow: a type
+// the declaration does state is still walked past as an error.
+func TestCheckPathStillStopsAtADeclaredScalar(t *testing.T) {
+	t.Parallel()
+	schema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"name": map[string]any{"type": "string"}},
+	}
+	err := typesys.CheckPath(schema, []string{"name", "first"})
+	require.ErrorContains(t, err, "is a string, so it has no field \"first\"")
+}
+
+func TestSchemaAtReachesWhatThePathNames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path []string
+		want string
+	}{
+		{[]string{"$"}, "object"},
+		{[]string{"rows"}, "array"},
+		{[]string{"rows", "0"}, "object"},
+		{[]string{"rows", "0", "text"}, "string"},
+		{[]string{"source", "document"}, "string"},
+	} {
+		schema, decided := typesys.SchemaAt(rowsSchema(), tc.path)
+		require.Truef(t, decided, "path %v", tc.path)
+		require.Equalf(t, tc.want, schema["type"], "path %v", tc.path)
+	}
+}
+
+// TestSchemaAtLeavesUndecidedWhatTheTypeDoesNotDecide covers the paths CheckPath
+// accepts or rejects but that name no single shape: a field spread across an
+// array's elements is accepted there, and yields no type here.
+func TestSchemaAtLeavesUndecidedWhatTheTypeDoesNotDecide(t *testing.T) {
+	t.Parallel()
+	for _, path := range [][]string{
+		{"missing"},
+		{"status", "length"},
+		{"rows", "text"},
+		{"rows", "-1"},
+	} {
+		_, decided := typesys.SchemaAt(rowsSchema(), path)
+		require.Falsef(t, decided, "path %v", path)
+	}
+	_, decided := typesys.SchemaAt(map[string]any{"description": "any value"}, []string{"$"})
+	require.True(t, decided, "a described value is still a schema at its own position")
+	_, decided = typesys.SchemaAt(nil, []string{"$"})
+	require.False(t, decided)
+}

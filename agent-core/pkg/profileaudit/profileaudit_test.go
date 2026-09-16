@@ -233,50 +233,7 @@ func TestMachineOverrideSkipsUnusedDefaultMachineAndSelection(t *testing.T) {
 }
 
 func TestInspectFollowsCompatibilityChildAndEvaluatorPointWrappers(t *testing.T) {
-	root := t.TempDir()
-	child := filepath.Join(root, "child")
-	require.NoError(t, os.Mkdir(child, 0o755))
-	write(t, child, "machine.yaml", oneActionMachine("15s", "child_wait"))
-	write(t, child, "tools.yaml", "tools: [child_wait]\n")
-	write(t, child, "declarations.yaml", declarations(tool("child_wait", "custom_await", "15s", "internal")))
-	writeProfile(t, child, "profile.yaml", "machine.yaml", "tools.yaml", "declarations.yaml", "")
-
-	write(t, root, "machine.yaml", `
-name: wrappers
-initial_state: S0
-budget: {max_iterations: 5, command_timeout: 10m}
-states: [S0, S1, {name: Done, run_status: succeeded}]
-terminal_states: [Done]
-signals: [Seed, ChildDone, PointDone]
-transitions:
-  - {state: S0, signal: Seed, next: S1, action: invoke_executor}
-  - {state: S1, signal: ChildDone, next: Done, action: evaluate_point}
-`)
-	write(t, root, "point.yaml", oneActionMachine("20s", "point_wait"))
-	write(t, root, "point-tools.yaml", "tools: [point_wait]\n")
-	write(t, root, "point-declarations.yaml", declarations(tool("point_wait", "custom_await", "20s", "internal")))
-	write(t, root, "tools.yaml", "tools: [invoke_executor, evaluate_point]\n")
-	write(t, root, "declarations.yaml", declarations(`
-  - name: invoke_executor
-    type: builtin
-    init: self_invoke
-    category: boundary
-    visibility: internal
-    config: {profile: child/profile.yaml}
-  - name: evaluate_point
-    type: builtin
-    init: run_point
-    category: boundary
-    visibility: internal
-    config:
-      point_machine: point.yaml
-      point_tools: point-tools.yaml
-      point_tool_declarations: [point-declarations.yaml]
-      agent_name: point
-      max_iterations: 5
-      success_state: Done
-`))
-	profile := writeProfile(t, root, "profile.yaml", "machine.yaml", "tools.yaml", "declarations.yaml", "")
+	_, profile := wrapperProfile(t)
 
 	report, err := Inspect(profile)
 	require.NoError(t, err)
