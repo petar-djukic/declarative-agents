@@ -43,7 +43,22 @@ requirements:
           unique within its unit.
       - R1.4: >-
           A type SHALL be addressed as `<unit>.<Name>`. The unit segment is the
-          declaring file's `unit` value, not its path.
+          declaring file's `unit` value, not its path, and it is a namespace:
+          the name it qualifies is unique within that unit and carries no
+          claim on the same name in another one. Every reference states the
+          unit it means, so an application names a shape for what it is rather
+          than for what no other unit has taken.
+      - R1.5: >-
+          A type is reachable only from a closure that imports its unit, and a
+          declaration tree reaches only the units it can name by a relative
+          path under srd050 R1.2. An application therefore declares its own
+          units for the shapes its words publish, including shapes agent-core
+          declares under the same names. That restatement is the design, not
+          drift: the two trees sit at different relative distances in the
+          repository and in the runtime image, so no single import path
+          resolves in both, and a reference that happens to resolve because
+          some other declaration pulled the unit into the closure resolves by
+          accident and SHALL NOT be relied on.
 
   R2:
     title: Closed schema subset
@@ -89,8 +104,11 @@ requirements:
           A reference to an unknown unit or an unknown name SHALL be a load
           error naming both the unit and the name that could not be found.
       - R4.3: >-
-          The same type name declared in two units SHALL be a load error naming
-          both declaring units.
+          One unit declaring the same type name twice SHALL be a load error
+          naming the unit and the name, and naming both declaring files when a
+          unit spans more than one. The same name declared in two different
+          units SHALL load: they are two types with two addresses, and no
+          reference can mean both.
       - R4.4: >-
           A reference cycle SHALL be a load error naming the references that
           form it, rather than exhausting the stack. A type referring to itself
@@ -167,8 +185,19 @@ requirements:
           contract is exactly what a signature states, so an unsigned one
           defaults nothing and publishes an untyped label. A tool of category
           boundary or stateful_internal MAY declare one; the corpus audit
-          SHALL NOT require it while the envelope a boundary label publishes
-          has no declared type.
+          SHALL NOT require it, because the label such a tool publishes is
+          typed from the runtime result under srd038 R2.19 rather than from a
+          declaration, and a signature restating that result would be a second
+          statement free to disagree with it.
+      - R6.13: >-
+          A signature SHALL discharge the `relationships` obligation without
+          defaulting it. Which tools sit either side of this one is a machine's
+          statement, and neither a signature nor a description implies it, so
+          there is nothing for a default to fill and nothing for an author to
+          restate. A tool declaring no signature SHALL still state its
+          neighbors. The authoring checks and the corpus audit SHALL both read
+          this rule, so the advisory never asks for a block the audit does not
+          require.
 
 non_goals:
   - Parameterized types, generics over declarations, or conditional schemas.
@@ -176,12 +205,12 @@ non_goals:
   - Validating runtime values against a declared type; these types constrain declarations, not payloads.
   - Tool signatures, typed labels, and machine exhaustiveness, which build on this and are specified separately.
   - Widening the schema subset toward complete JSON Schema.
-  - Remote or registry-hosted type units; imports stay relative paths as srd050 fixes them.
+  - Remote or registry-hosted type units, and any other way for one declaration tree to depend on another's units; imports stay relative paths as srd050 fixes them (R1.5).
 
 acceptance_criteria:
   - id: AC1
-    criterion: A type unit declares named types, imports another type unit, and its types are addressable as unit.Name.
-    traces: [R1.1, R1.2, R1.3, R1.4]
+    criterion: A type unit declares named types, imports another type unit, and its types are addressable as unit.Name from any closure that imports it and from no other.
+    traces: [R1.1, R1.2, R1.3, R1.4, R1.5]
   - id: AC2
     criterion: Every keyword outside the closed subset fails the load naming the keyword, the unit, and the type, including a violation nested inside properties and one inside items.
     traces: [R2.1, R2.2, R2.3, R2.4]
@@ -189,7 +218,7 @@ acceptance_criteria:
     criterion: A tool declaration that imports a type unit uses a reference in its output schema and its parameters, including a reference nested inside properties, and mixing $type with sibling keywords fails.
     traces: [R3.1, R3.2, R3.3]
   - id: AC4
-    criterion: Unknown references, duplicate names across units, and reference cycles each fail the load with the stated evidence, and repeated resolution of one schema yields the same result without mutating the declaration.
+    criterion: Unknown references, a name one unit declares twice, and reference cycles each fail the load with the stated evidence; two units each declaring one name resolve to two types; and repeated resolution of one schema yields the same result without mutating the declaration.
     traces: [R4.1, R4.2, R4.3, R4.4, R4.5]
   - id: AC5
     criterion: An unimported type unit produces the existing unused-unit error, and the canonical dump carries a sorted types section with tool schemas rendered resolved.
@@ -198,8 +227,8 @@ acceptance_criteria:
     criterion: A tool declaring a signature loads, each consistency rule rejects its conflicting form while identical emits lists are accepted, and a signature type resolves under the ordinary reference rules.
     traces: [R6.1, R6.2, R6.3, R6.4, R6.5]
   - id: AC7
-    criterion: A word tool declaring only name, description, category, init, signature, and config satisfies every contract check, a boundary tool omitting side_effects, reversibility, or undo still fails, an explicit block overrides its default, the dump shows the effective contract, and a word whose prose contract is complete but which declares no signature fails the corpus audit while a boundary tool without one passes.
-    traces: [R6.6, R6.7, R6.8, R6.9, R6.10, R6.11, R6.12]
+    criterion: A word tool declaring only name, description, category, init, signature, and config satisfies every contract check, a boundary tool omitting side_effects, reversibility, or undo still fails, an explicit block overrides its default, the dump shows the effective contract, and a word whose prose contract is complete but which declares no signature fails the corpus audit while a boundary tool without one passes, and a signed word omitting relationships is accepted by the authoring checks and the corpus audit alike while an unsigned one is not.
+    traces: [R6.6, R6.7, R6.8, R6.9, R6.10, R6.11, R6.12, R6.13]
 
 depends_on:
   - srd_id: srd050-declaration-imports
@@ -218,3 +247,7 @@ implementation_status:
     - GH-2001 loads type units into the closure, accepts references in tool schemas, and adds the dump types section.
     - GH-2006 through GH-2025 sign every word and response declaration in the repository.
     - GH-2009 promotes R6.12, so an unsigned word fails the corpus audit.
+    - GH-2064 and GH-2065 type the boundary REST labels from the runtime result, which is what R6.12 exempts a boundary tool from restating.
+    - GH-2026 makes the unit segment a namespace (R1.4, R4.3), so catalog-types-core declares Text and Comparison under the names they describe.
+    - GH-2023 promotes R6.13, so the authoring checks in internal/tools/catalog and the corpus audit in pkg/spec agree about relationships.
+    - GH-2069 promotes R1.5 after establishing that an application cannot reach agent-core's units: the repository and the image place the two trees at different relative distances.

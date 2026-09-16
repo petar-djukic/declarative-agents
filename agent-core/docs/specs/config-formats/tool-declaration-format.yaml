@@ -644,6 +644,74 @@ declaration_files:
       directory contains its own llm/ subdirectory with one file per
       model variant. See cfg-llm-config-format for details.
 
+fragment_files:
+  description: |
+    A tool declaration file MAY be a fragment: a unit with declared, typed
+    parameters that another file instantiates with arguments
+    (srd052-declaration-fragments). The two file-level fields below sit
+    beside `unit` and `imports` (srd050). A fragment is only ever
+    instantiated; listing one under `imports` is a load error. Substitution
+    replaces `$param(name)` inside scalar values only, never inside mapping
+    names or list structure, and the instantiated document is decoded and
+    validated exactly as a hand-written file would be. Nothing generated is
+    committed. Arriving with GH-2081.
+  fields:
+    - field: params
+      type: "[]param"
+      required: false
+      description: |
+        Declares the fragment's parameters. Present together with exactly one
+        body (`tools` here). Each entry carries `name` and `type`, and
+        optionally `enum`, `default`, and `description`. `type` is one of
+        string, integer, number, boolean. A file with `params` and no body,
+        or a body with a `$param(` reference and no `params`, fails to load.
+    - field: instantiate
+      type: "[]instantiation"
+      required: false
+      description: |
+        Instantiates fragments into this file's closure. Each entry carries
+        `fragment`, a path relative to this file under the import rules;
+        `args`, a mapping from parameter name to value; and optionally `as`,
+        a prefix applied as `<as>_` to every name the instantiation produces
+        so one fragment can be instantiated more than once. Every parameter
+        without a default must be supplied; an unknown argument, a wrong type,
+        or a value outside an enum fails naming this file, the fragment, and
+        the parameter.
+  example: |
+    # units/embed-provider.yaml -- the fragment
+    unit: embed-provider
+    imports:
+    - ./types-core.yaml
+    params:
+    - name: provider
+      type: string
+      enum: [cohere, openai, ollama]
+    - name: model
+      type: string
+    tools:
+    - name: embed_query
+      type: builtin
+      init: rest_client_invoke
+      category: boundary
+      description: Embed the query with $param(provider) model $param(model).
+      config:
+        rest_ref: $param(provider)_api
+        operation: embed
+
+    # agents/rag/declarations.yaml -- the importer
+    unit: rag
+    imports:
+    - ../units/types-core.yaml
+    instantiate:
+    - fragment: ../units/embed-provider.yaml
+      as: cohere
+      args: {provider: cohere, model: embed-english-v3.0}
+    - fragment: ../units/embed-provider.yaml
+      as: openai
+      args: {provider: openai, model: text-embedding-3-small}
+    tools: []
+    # produces cohere_embed_query and openai_embed_query
+
 boundary_compensation_example: |
   Boundary tools that cross process, issue, or human boundaries declare
   payload: boundary_compensation in their undo section. At runtime, the
@@ -680,14 +748,15 @@ inline_pattern: |
   keeping active profiles on individual declaration files.
 
 contract_validation: |
-  Tool vocabulary contract fields are validated incrementally. During
-  migration, ValidateToolContracts can run in warn-only mode over selected
-  tools and return structured findings with tool name, field, severity,
-  category, message, and remediation. Strict mode escalates missing required
-  contract fields to errors for tests or future startup enforcement. Internal
-  tools are excluded by default unless IncludeInternal is set. When category
-  is declared, validation reports that explicit category (for example,
-  boundary) instead of falling back to internal, external_builtin, or exec.
+  Contract completeness is checked once, by the corpus audit in pkg/spec,
+  over every tool a profile selects. A declaration with contract: legacy
+  draws a warning; a migrated or strict one draws an error for each missing
+  field, named with the tool, its source file, and the selections that use
+  it. A signature discharges the blocks the load-time defaults fill, and the
+  audit reads the same discharge table the loader applies (srd051 R6), so the
+  two cannot disagree about what a signature covers. Runtime startup checks
+  wiring only: emitted signals the machine can route, selector labels that
+  resolve, and receipt-consuming undo where a tool mutates state.
 
 structured_output_strategy: |
   Tool output has two compatible runtime forms:
@@ -811,6 +880,7 @@ target_grouped_layout:
     - Do not move invoke_llm into a shared group; keep model-boundary declarations agent-local.
 
 related_documents:
+  - srd052-declaration-fragments
   - cfg-tool-authoring-standard
   - srd013
   - srd021

@@ -24,6 +24,10 @@ public Go APIs. Placement rules are defined in
   `cmd/agent` and catalog gates. It currently imports internal catalog, REST,
   runtime, load, and support surfaces listed in
   `internal/boundaries/boundaries_baseline.txt`.
+- `pkg/profilestage` is a public package the application build lanes use to
+  copy a declaration tree into a staged profile and prove the copy resolves. It
+  follows the import edges a declaration carries rather than enumerating the
+  sibling directories those edges reach.
 - `agents/`, `tools/`, `docs/`, and `testdata/` remain configuration,
   specification, and fixture directories rather than Go package domains.
 - Each migration should preserve behavior first. Rename symbols or redesign APIs
@@ -70,6 +74,11 @@ apart from `br.Register` calls.
 - `internal/runtime`: agent loop runtime, state machines, dispatch,
   checkpoints (`internal/runtime/checkpoint` owns Dolt DSN and resume flags),
   rollback, and workspace refs.
+- `internal/fragments`: the parameter and substitution rules of a
+  parameterized declaration fragment (srd052): typed parameters, argument
+  checking, and hygienic `$param(name)` substitution over scalar values only.
+  The catalog resolver owns where instantiation runs; this package owns what
+  an argument may be and where it may land.
 - `internal/load`: the single profile declaration-closure loader shared by
   runtime startup and profile audit.
 - `internal/typesys`: named declaration types, the closed schema subset, and
@@ -102,6 +111,7 @@ Generated from `go list ./...`. The boundaries gate checks this list.
 - `internal/doltsql`
 - `internal/evaluation`
 - `internal/declstyle`
+- `internal/fragments`
 - `internal/gostyle`
 - `internal/load`
 - `internal/model`
@@ -158,6 +168,7 @@ Generated from `go list ./...`. The boundaries gate checks this list.
 - `internal/typesys`
 - `internal/version`
 - `pkg/profileaudit`
+- `pkg/profilestage`
 - `pkg/spec`
 
 REST subpackages layer as definition (model and loading) under validation; the

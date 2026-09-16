@@ -698,15 +698,51 @@ func loadValidatedRuntimeMachine(closure *internalload.Closure) (core.MachineSpe
 		return core.MachineSpec{}, fmt.Errorf("load machine runtime policy: %w", err)
 	}
 	if err := validateRuntimeToolWiring(
-		machineSpec, closure.Selected, closure.Types,
+		machineSpec, closure.Selected, closure.Types, closure.Rest,
 		catalog.ExhaustivenessInputs{External: requestSourceSignals(closure.Rest)},
 	); err != nil {
 		return core.MachineSpec{}, err
 	}
-	if err := profileaudit.ValidateClosure(closure); err != nil {
+	// Every machine this walk reaches is checked here and not above: the
+	// profile's own machine is the one loadValidatedRuntimeMachine already
+	// holds, and the machines its endpoints dispatch, its child profiles run,
+	// and its evaluator points loop over are reachable only through the walk
+	// (GH-2059, GH-2060).
+	if err := profileaudit.ValidateClosureWithOptions(closure, profileaudit.Options{
+		OnMachine: validateReachedMachine,
+	}); err != nil {
 		return core.MachineSpec{}, fmt.Errorf("inspect profile timeout closure: %w", err)
 	}
 	return machineSpec, nil
+}
+
+// validateReachedMachine applies the startup boundary to one machine the walk
+// reaches, which is every machine a profile runs beyond its own: the machines
+// its endpoints dispatch, the profiles its self_invoke words start, and the
+// machines its evaluator points loop over.
+//
+// Only a request machine takes extra context. It is seeded by the request
+// rather than by its own transitions, so the machine_request entry under the
+// seed label and the signals the dispatching endpoints inject are stated here
+// rather than read from the machine. A child profile and a point machine start
+// on the ordinary runtime seed, which the exhaustiveness check already knows.
+func validateReachedMachine(reached profileaudit.ReachedMachine) error {
+	inputs := catalog.ExhaustivenessInputs{External: requestSourceSignals(reached.Rest)}
+	var runtimeLabels []string
+	kind := "machine"
+	if reached.RequestScoped {
+		inputs.External = append(inputs.External, reached.InitialSignals...)
+		runtimeLabels = []string{catalog.RequestSeedLabel}
+		kind = "request machine"
+	}
+	err := validateRuntimeToolWiring(
+		reached.Machine, reached.Selected, reached.Types, reached.Rest,
+		inputs, runtimeLabels...,
+	)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", kind, reached.MachinePath, err)
+	}
+	return nil
 }
 
 // validateRuntimeToolWiring is the ordinary startup boundary. It rejects
@@ -716,7 +752,8 @@ func loadValidatedRuntimeMachine(closure *internalload.Closure) (core.MachineSpe
 // specification-audit concern.
 func validateRuntimeToolWiring(
 	machine core.MachineSpec, defs []catalog.ToolDef, types *typesys.Registry,
-	exhaustiveness catalog.ExhaustivenessInputs,
+	operations catalog.RESTOperations,
+	exhaustiveness catalog.ExhaustivenessInputs, runtimeLabels ...string,
 ) error {
 	if err := catalog.ValidateMachineActions(machine, defs); err != nil {
 		return err
@@ -730,10 +767,10 @@ func validateRuntimeToolWiring(
 	if err := catalog.ValidateToolEmits(machine, defs); err != nil {
 		return err
 	}
-	if err := catalog.ValidateSelectorLabelsStrict(machine, defs); err != nil {
+	if err := catalog.ValidateSelectorLabelsStrict(machine, defs, runtimeLabels...); err != nil {
 		return err
 	}
-	if err := catalog.ValidateSelectorPathsStrict(machine, defs, types); err != nil {
+	if err := catalog.ValidateSelectorPathsStrict(machine, defs, types, operations); err != nil {
 		return err
 	}
 	if err := catalog.ValidateMachineExhaustivenessStrict(machine, defs, exhaustiveness); err != nil {
