@@ -143,3 +143,38 @@ func TestCollectWithoutImportsReportsNoUnits(t *testing.T) {
 		t.Fatalf("fixture without imports reported units: %#v", result)
 	}
 }
+
+// TestCollectKeysLibraryRootedImportsByPath is srd056 R1.1: two files in
+// different directories importing one agent-core unit by its install path
+// share that unit, instead of each joining the path onto its own directory.
+func TestCollectKeysLibraryRootedImportsByPath(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"agents/one", "agents/two"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeReuseFixture(t, root, directory+"/declarations.yaml",
+			"unit: "+filepath.Base(directory)+"\nimports:\n- /opt/agent-core/tools/units/types-core.yaml\ntools: []\n")
+	}
+
+	result := mustCollect(t, root, "agents")
+
+	if result.ImportedUnits != 1 || result.SharedUnits != 1 {
+		t.Fatalf("ImportedUnits, SharedUnits = %d, %d; want 1, 1", result.ImportedUnits, result.SharedUnits)
+	}
+}
+
+// TestCollectCountsTemplateMachineActions is GH-2132: a machine template's
+// actions sit under its machine body and count once, at the template.
+func TestCollectCountsTemplateMachineActions(t *testing.T) {
+	root := t.TempDir()
+	writeReuseFixture(t, root, "template.yaml", "unit: serve\nparams:\n  - {name: word, type: string}\nmachine:\n  transitions:\n"+
+		"    - {state: Idle, signal: Seed, next: Serving, action: launch}\n    - {state: Serving, signal: Tick, next: Serving, action: $tool}\n")
+	writeReuseFixture(t, root, "instance.yaml", "unit: one\ninstantiate:\n  - fragment: template.yaml\n    args: {word: go}\n")
+
+	result := mustCollect(t, root, ".")
+
+	if result.ToolRefs != 1 {
+		t.Fatalf("ToolRefs = %d, want 1 from the template body ($tool excluded)", result.ToolRefs)
+	}
+}
