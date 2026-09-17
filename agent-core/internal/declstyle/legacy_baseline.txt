@@ -6,13 +6,46 @@
 # fails as stale. Converting a file means deleting its lines in the same change.
 #
 # Classes:
-#   untyped-tool:<file>:<tool>     word or response tool with no signature:
+#   untyped-tool:<file>:<tool>     word, response, boundary, or stateful_internal
+#                                  tool with no signature
+#   uncategorized-tool:<file>:<tool> tool with no category; srd051 R6.15
 #   prose-defaulted:<file>:<tool>  signed tool still carrying a block equal to
 #                                  its category default, so deleting it changes
 #                                  nothing
+#   long-declaration-file:<file>   declaration YAML over 300 lines; split it or
+#                                  extract a fragment (execution constitution E11)
+#   single-importer-unit:<file>    unit with one importer and no instantiation;
+#                                  fold it back (type-only units and agent-core's
+#                                  library are exempt). No entries: the class
+#                                  started clean.
 #
-# Boundary words are absent by design: srd051 R6.9 keeps their side-effect,
-# reversibility, and undo blocks explicit, so an unsigned boundary word is not a
-# legacy form to retire.
+# Boundary and stateful_internal tools count as typed categories since GH-2110
+# (srd051 R6.14): their signature names their signals and discharges the prose,
+# while their effect blocks stay explicit.
 #
 # GH-2009 flips the type system strict once this file has no entries.
+
+# Declaration files over 300 lines when the length class landed (GH-2111).
+long-declaration-file:agent-core/tools/builtin/otlp/all.yaml
+long-declaration-file:agent-core/tools/builtin/rest/all.yaml
+long-declaration-file:applications/catalog/agents/collector/query-declarations.yaml
+long-declaration-file:applications/catalog/agents/critic/point.yaml
+long-declaration-file:applications/catalog/agents/knowledge-manager/corpus-ingest/declarations.yaml
+long-declaration-file:applications/catalog/agents/knowledge-manager/documentation-curator/declarations.yaml
+long-declaration-file:applications/catalog/agents/knowledge-manager/documentation-curator/request-declarations.yaml
+long-declaration-file:applications/catalog/agents/knowledge-manager/documentation-curator/rest.yaml
+long-declaration-file:applications/catalog/agents/planner/machine-passthrough.yaml
+long-declaration-file:applications/catalog/agents/planner/machine.yaml
+long-declaration-file:applications/catalog/agents/scenario-critic/declarations.yaml
+long-declaration-file:applications/catalog/agents/scenario-critic/machine.yaml
+long-declaration-file:applications/catalog/agents/units/types-curator.yaml
+long-declaration-file:applications/chatbot-mesh/agents/chatbot/request-declarations.yaml
+long-declaration-file:applications/chatbot-mesh/agents/creator/request-declarations.yaml
+long-declaration-file:applications/chatbot-mesh/agents/creator/rest.yaml
+long-declaration-file:applications/chatbot-mesh/agents/observer/declarations.yaml
+long-declaration-file:applications/chatbot-mesh/agents/observer/rest.yaml
+long-declaration-file:applications/chatbot-mesh/agents/provisioning-workflow-orchestrator/rest.yaml
+long-declaration-file:applications/chatbot-mesh/testdata/rig/declarations.yaml
+
+# Unsigned boundary and stateful_internal tools and uncategorized tools when
+# srd051 R6.14 and R6.15 landed (GH-2110). Each application migration deletes its lines.
