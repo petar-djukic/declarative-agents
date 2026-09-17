@@ -20,14 +20,16 @@ The table lists the shared units that exist today and the ones the capability-pr
 | monitor service machine template | `agent-core/tools/machines/monitor-service-machine-template.yaml` | shipped |
 | serve machine template | `agent-core/tools/machines/serve-machine-template.yaml` | shipped |
 | lifecycle approval machine template | `agent-core/tools/machines/lifecycle-approval-machine-template.yaml` | shipped |
-| mesh monitor fragment | `applications/chatbot-mesh/agents/units/mesh-monitor-fragment.yaml` | shipped, promotion to agent-core planned (GH-2166) |
-| monitor control fragment | `applications/catalog/agents/units/monitor-control-fragment.yaml` | shipped, reconciliation with the above planned (GH-2166) |
-| serve-lifecycle declarations fragment | `agent-core/tools/units/` | planned (GH-2166) |
-| monitor/control REST servers fragment | `agent-core/tools/rest/units/` | planned (GH-2167) |
+| mesh monitor fragment (launch/stop pair) | `applications/chatbot-mesh/agents/units/mesh-monitor-fragment.yaml` | shipped |
+| monitor control fragment (launch/await/stop trio) | `applications/catalog/agents/units/monitor-control-fragment.yaml` | shipped |
+| serve-lifecycle declarations fragment | `agent-core/tools/units/serve-lifecycle-declarations-fragment.yaml` | shipped (GH-2166) |
+| monitor server fragment | `agent-core/tools/rest/units/monitor-server-fragment.yaml` | shipped (GH-2167) |
 
 ## REST definitions
 
-`rest.yaml` supports no reuse mechanism today; every REST file is self-contained. Extending REST definition loading with `unit:` and `instantiate:` — the same grammar declaration files use — is planned in GH-2167, together with a canonical fragment for the control server and the eight monitor routes that every serving wrapper carries. Until then, REST blocks are copied (see [serving-wrappers.md](serving-wrappers.md) for the copy source).
+`rest.yaml` composes exactly as a declarations file does: `unit:`, `imports:` and `instantiate:` are implemented in the REST definition loader and enforce the srd052 rules. The canonical monitor server ships at `agent-core/tools/rest/units/monitor-server-fragment.yaml`, and an agent instantiates it with its address, limits profile and queue name.
+
+Two rules shape where that instantiation goes. An instantiation none of whose produced definitions a closure selects is an unused import (srd052 R3.1), so a server cannot be instantiated in a `rest.yaml` that a request profile also loads — the request machine launches no monitor server. The instantiation therefore lives in a `monitor-rest.yaml` that only the agent's own profile lists. And a mapping name is never substituted (R2.3), so the fragment produces a server under a fixed name; an agent whose server takes another name instantiates it under `as`, which prefixes every produced name including the endpoints.
 
 ## When to make a fragment
 
