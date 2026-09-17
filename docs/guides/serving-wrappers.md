@@ -1,7 +1,7 @@
 <!-- Copyright (c) 2026 Nokia -->
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 
-# Serving wrappers and workload promotion
+# Serving wrappers and blueprints
 
 A serving wrapper turns a capability into a workload. It contributes exactly four things: a serve machine (launch, await control, stop), the lifecycle tool words, the control and monitor REST servers, and the application routes that bind capabilities. Everything else belongs to the capability profiles it hosts.
 
@@ -9,33 +9,28 @@ The target shape exists in the tree: `applications/agent-architecture/agents/app
 
 ## The serve machine
 
-We do not write serve loops by hand. `agent-core/tools/machines/` ships the templates — `serve-machine-template.yaml`, `monitor-service-machine-template.yaml`, `lifecycle-approval-machine-template.yaml` — and a wrapper's `machine.yaml` reduces to one instantiation with the four word names as arguments. `applications/chatbot-mesh/agents/chatbot/machine.yaml` is the reference instance at 25 lines; the same machine written out by hand runs about 60. Migration of the remaining hand-rolled serve machines is tracked in GH-2168 (planned).
+We do not write serve loops by hand. `agent-core/tools/machines/` ships the templates — `serve-machine-template.yaml`, `monitor-service-machine-template.yaml`, `lifecycle-approval-machine-template.yaml` — and a wrapper's `machine.yaml` reduces to one instantiation. The serve template takes the four word names, a `workflow` value for the machine's metric label, and an optional `command_timeout`; its transitions carry the phase labels every serve agent shares, so an instance's telemetry names the agent and the phase without writing either out. `applications/chatbot-mesh/agents/chatbot/machine.yaml` is the reference instance; documentation-curator shows the label and budget arguments in use.
+
+A machine that is the serve lifecycle plus extra states — a poll loop, an intake loop, a launch sequence — is not an instance, because an instance carries only its name, purpose and arguments (srd054 R1.2). The extra states are a capability waiting to be cleaved out (GH-2170, GH-2171), and the wrapper becomes an instance when they go.
 
 ## The lifecycle vocabulary and monitor pair
 
-The six lifecycle words (launch requests, launch control, await control, stop requests, and the exit and stop variants) and the monitor launch/stop pair are the same in every wrapper up to naming. They become fragment instantiations: the monitor pair from the shared monitor fragment (the chatbot-mesh chatbot already instantiates it), and the lifecycle words from a serve-lifecycle declarations fragment planned in GH-2166. Until that fragment ships, new wrappers copy the chatbot-mesh chatbot's declarations rather than a demo repository's — the monorepo copy is the shortest and closest to the fragment's target content.
+The six lifecycle words (launch requests, launch control, await control, stop requests, and the exit and stop variants) and the monitor launch/stop pair are the same in every wrapper up to naming. Both are fragment instantiations now. The four lifecycle words come from `agent-core/tools/units/serve-lifecycle-declarations-fragment.yaml`, which takes the names they arrive under as arguments, so the machine that references them needs no change; the monitor pair comes from the monitor fragment beside the agent. A chatbot-mesh wrapper's whole declarations file is those two instantiations and nothing else, about twenty lines where it was a hundred and thirty-five.
+
+The two monitor fragments in the tree are not duplicates of each other. `mesh-monitor-fragment.yaml` is the launch/stop pair for an agent that has its own control server and await word; `catalog/agents/units/monitor-control-fragment.yaml` is the launch/await/stop trio for an agent whose control server is its monitor server. They compose different sets, and fragments do not nest (srd052 R1.2), so the shared monitor words stay written twice.
 
 ## The control and monitor servers
 
-Every wrapper exposes the same eight monitor routes and the control server. This block becomes a REST fragment once `rest.yaml` supports instantiation (GH-2167, planned). Until then we copy the block from `applications/chatbot-mesh/agents/chatbot/rest.yaml` unchanged apart from ports and the agent name, because the monitor OpenAPI surface is pinned by the presentation contract of the declarative UX epic (GH-2154).
+Every wrapper exposes the same eight monitor routes and the control server. The monitor server is now one instantiation of `agent-core/tools/rest/units/monitor-server-fragment.yaml`, and it lives in a `monitor-rest.yaml` that only the agent's own profile lists, because a `rest.yaml` shared with a request profile would make the instantiation an unused import there (srd052 R3.1). The control server stays written out: its name differs per agent, and instantiating it under `as` would rename its endpoints and with them the generated OpenAPI operation ids, which is a worse trade than the ten lines it saves.
 
-## Promotion
+## The wrapper as a blueprint
 
-Promotion makes the wrapper disappear. A deployment entry in `application.yaml` names the capability profile and the staging pipeline generates the wrapper into the staged closure:
+The wrappers are one agent with arguments: they differ by agent name, two ports, the four lifecycle word names, and their application routes. That is what an agent blueprint is for. srd055 declares a whole profile once as a fragment with typed parameters, carries its machine template and units with it, and each agent's profile becomes an instance holding a name, the arguments, and only the fields that genuinely differ. Implementation is GH-2123, and the serving wrappers are the profile group it was waiting for.
 
-```yaml
-deployment:
-  entries:
-    - id: observer
-      promote:
-        profile: agents/observer/profile.yaml
-        rest_extra: agents/observer/rest.yaml
-      workload: observer
-      mount_path: /profiles
-```
+We do not add a second profile-level templating mechanism beside it. An earlier proposal to generate wrappers from an `application.yaml` promotion entry (GH-2169) was closed for that reason: the deployment entry stays what it is, and the wrapper becomes a blueprint instance.
 
-This is planned work (GH-2169); the section records the target shape so wrappers written today converge toward it. Generation happens at profile-staging time in `pkg/profilestage`, the generated files land in `helm/profiles/` like hand-written ones, and the generic binary needs no change. The parity gate is `--dump-config` equality with the wrapper the entry replaces.
+The shape to converge on already exists in the tree. `applications/agent-architecture/agents/applier/` is a workload in an 11-line `profile.yaml` plus a `rest.yaml`, and a blueprint instance is that with its arguments named.
 
 ## Checklist for a new workload
 
-Until promotion lands, a new workload adds: a wrapper `profile.yaml` referencing the capability's files, a serve `machine.yaml` as a template instance, `tools.yaml` listing the lifecycle words, `declarations.yaml` instantiating the monitor fragment plus the lifecycle words, a `rest.yaml` with the copied control/monitor block plus the application routes, and one `roots[]` plus one `deployment.entries[]` line in `application.yaml`. After GH-2169, the same workload is the one deployment entry.
+Until blueprints land, a new workload adds: a wrapper `profile.yaml` referencing the capability's files, a serve `machine.yaml` as a template instance, `tools.yaml` listing the lifecycle words, `declarations.yaml` instantiating the monitor fragment plus the lifecycle words, a `rest.yaml` carrying the control and monitor block plus the application routes, and one `roots[]` and one `deployment.entries[]` line in `application.yaml`. After GH-2123, the first five collapse into an instance naming the blueprint and its arguments.
