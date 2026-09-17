@@ -22,27 +22,32 @@ import (
 
 // Entry classes. Adding a class is one line here plus its emitter.
 const (
-	classUntypedTool    = "untyped-tool"
-	classProseDefaulted = "prose-defaulted"
+	classUntypedTool       = "untyped-tool"
+	classProseDefaulted    = "prose-defaulted"
+	classUncategorizedTool = "uncategorized-tool"
 )
 
-// typedCategories are the categories a signature is expected to cover.
-// Boundary is absent: srd051 R6.9 keeps its contract blocks explicit, so an
-// unsigned boundary word is not a legacy form to retire here.
-var typedCategories = map[string]bool{"word": true, "response": true}
+// typedCategories are the categories a signature is expected to cover. Boundary
+// and stateful_internal joined word and response under srd051 R6.14: their
+// signature names their signals and discharges the descriptive prose, while
+// their effect blocks stay explicit (R6.8, R6.9), so an unsigned one is a legacy
+// form to retire (GH-2110).
+var typedCategories = map[string]bool{
+	"word": true, "response": true, "boundary": true, "stateful_internal": true,
+}
 
 // TestDeclarationLegacyBaseline holds the line on declaration form while the
 // type system migration runs. Every legacy usage in the repository is listed in
 // legacy_baseline.txt; the gate fails on any usage not in it, and on any entry
 // no longer present, so the baseline shrinks and never grows.
 func TestDeclarationLegacyBaseline(t *testing.T) {
-	found := collectLegacyEntries(t)
+	found, lengths := collectLegacyEntries(t)
 	baseline := loadBaseline(t, filepath.Join(thisDir(t), "legacy_baseline.txt"))
 
 	var added []string
 	for _, entry := range found {
 		if !baseline[entry] {
-			added = append(added, entry)
+			added = append(added, describeNewEntry(entry, lengths))
 		}
 	}
 	seen := make(map[string]bool, len(found))
@@ -89,7 +94,7 @@ type declarationFile struct {
 	} `yaml:"tools"`
 }
 
-func collectLegacyEntries(t *testing.T) []string {
+func collectLegacyEntries(t *testing.T) ([]string, map[string]int) {
 	t.Helper()
 	var entries []string
 	paths, err := discoverLegacyDeclarationFiles(declarationRoots(t))
@@ -97,8 +102,16 @@ func collectLegacyEntries(t *testing.T) []string {
 	for _, path := range paths {
 		entries = append(entries, fileEntries(t, path)...)
 	}
+	singles, err := singleImporterEntries(paths, moduleRoot(t), filepath.Dir(moduleRoot(t)))
+	require.NoError(t, err)
+	entries = append(entries, singles...)
+	lengths, err := longFileEntries(paths, filepath.Dir(moduleRoot(t)))
+	require.NoError(t, err)
+	for entry := range lengths {
+		entries = append(entries, entry)
+	}
 	sort.Strings(entries)
-	return entries
+	return entries, lengths
 }
 
 func discoverLegacyDeclarationFiles(roots []string) ([]string, error) {
@@ -201,7 +214,7 @@ func fileEntries(t *testing.T, path string) []string {
 	var file declarationFile
 	// A file that is not a tool declaration decodes to nothing and contributes
 	// nothing; this walks far more YAML than it classifies.
-	if yaml.Unmarshal(data, &file) != nil {
+	if yaml.Unmarshal(placeholderSafe(data), &file) != nil {
 		return nil
 	}
 	rel := repoRelative(t, path)
@@ -211,6 +224,10 @@ func fileEntries(t *testing.T, path string) []string {
 			continue
 		}
 		switch {
+		case tool.Category == "":
+			// srd051 R6.15: which contract defaults apply depends on the
+			// category, so a tool without one cannot be judged typed or not.
+			entries = append(entries, fmt.Sprintf("%s:%s:%s", classUncategorizedTool, rel, tool.Name))
 		case tool.Signature == nil:
 			if typedCategories[tool.Category] {
 				entries = append(entries, fmt.Sprintf("%s:%s:%s", classUntypedTool, rel, tool.Name))

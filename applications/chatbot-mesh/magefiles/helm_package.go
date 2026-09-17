@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/magefile/mage/mg"
+
+	"github.com/Nokia-Bell-Labs/declarative-agents/magefiles/helmlib"
 )
 
 var chatbotChartSourceFiles = []string{
@@ -22,6 +24,12 @@ var chatbotChartSourceFiles = []string{
 	"Chart.yaml",
 	"PACKAGING.md",
 	"README.md",
+	"charts/agent-services/Chart.yaml",
+	"charts/agent-services/README.md",
+	"charts/agent-services/templates/_applier.tpl",
+	"charts/agent-services/templates/_collector.tpl",
+	"charts/agent-services/templates/_naming.tpl",
+	"charts/agent-services/templates/_ollama.tpl",
 	"ci/kind-applier-values.yaml",
 	"ci/kind-config.yaml",
 	"ci/kind-demo-config.yaml",
@@ -117,6 +125,13 @@ func packageHelmChart(chartDir, profilesRoot, destination string) error {
 }
 
 func stagePackageChart(chartDir, profilesRoot, catalogRoot string) (string, func(), error) {
+	// The shared agent-services library chart the app chart depends on. Helm
+	// resolves a dependency only from the chart's own charts/ directory, and the
+	// vendored copy is generated rather than tracked, so every path that stages
+	// the chart refreshes it first (GH-2045, GH-2175).
+	if err := helmlib.Vendor(filepath.Join(profilesRoot, "..", ".."), chartDir); err != nil {
+		return "", nil, err
+	}
 	stage, err := os.MkdirTemp("", "chatbot-mesh-package-*")
 	if err != nil {
 		return "", nil, err
