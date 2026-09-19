@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/fragments"
+	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/runtime/core"
 	"github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/catalog"
 	toolrest "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest"
 	restdef "github.com/Nokia-Bell-Labs/declarative-agents/agent-core/internal/tools/rest/definition"
@@ -50,6 +51,57 @@ func validateImportUsedness(
 	}
 	sort.Strings(diagnostics)
 	return fmt.Errorf("unused declaration imports: %s", strings.Join(diagnostics, "; "))
+}
+
+// requestMachineWords returns the declared tools this closure's
+// machine_request machines run. The agent serves those requests from its own
+// tool universe and REST collection, so a word only a request machine runs is
+// used (srd052 R3.1): the chatbot's embed stage, for one, runs only in its
+// request machine (srd058 R4.2). A request profile that does not load
+// contributes no words and returns its load error, which the caller reports
+// in place of the unused imports it causes (GH-2250).
+func requestMachineWords(
+	machine core.MachineSpec, machinePath, profileDir string,
+	rest toolrest.Collection, universe []catalog.ToolDef,
+) ([]catalog.ToolDef, error) {
+	machines, err := toolrest.LoadDeclaredMachines(machine, machinePath, profileDir, rest)
+	if err != nil {
+		return nil, err
+	}
+	if len(machines) < 2 {
+		return nil, nil
+	}
+	actions := map[string]bool{}
+	for _, request := range machines[1:] {
+		for _, transition := range request.Transitions {
+			actions[transition.Action] = true
+		}
+	}
+	var words []catalog.ToolDef
+	for _, tool := range universe {
+		if actions[tool.Name] {
+			words = append(words, tool)
+		}
+	}
+	return words, nil
+}
+
+// validateClosureUsedness checks usedness over the selected words and the
+// words the closure's request machines run. A request machine that did not
+// load leaves its words uncounted, so its load error is the cause reported,
+// not the imports it strands (GH-2250).
+func validateClosureUsedness(
+	selected, universe []catalog.ToolDef, rest toolrest.Collection,
+	toolImports []catalog.ToolImport, typeUsed map[string]bool,
+	machine core.MachineSpec, machinePath, profileDir string,
+) error {
+	requestWords, requestErr := requestMachineWords(machine, machinePath, profileDir, rest, universe)
+	used := append(append([]catalog.ToolDef(nil), selected...), requestWords...)
+	err := validateImportUsedness(used, rest, toolImports, typeUsed)
+	if err != nil && requestErr != nil {
+		return fmt.Errorf("machine_request machine does not load, so the words it runs count as unused: %w", requestErr)
+	}
+	return err
 }
 
 func selectedToolSources(selected []catalog.ToolDef) map[string]bool {
